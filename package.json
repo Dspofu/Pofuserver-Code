@@ -1,0 +1,17 @@
+{
+  "name": "cliai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "electron": "^43.1.0",
+    "openai": "^6.46.0"
+  }
+}

@@ -16,11 +16,14 @@ O modelo age no seu workspace através de ferramentas (function calling):
 | `list_files` | Lista arquivos e pastas do diretório de trabalho |
 | `read_file` | Lê o conteúdo de um arquivo |
 | `write_file` | Cria ou sobrescreve um arquivo |
+| `create_directory` | Cria uma pasta (e diretórios pai, se necessário) |
 | `delete_file` | Apaga um arquivo |
 | `execute_command` | Roda um comando no terminal (dentro do workspace) |
 | `read_process_output` | Lê os logs de um processo em segundo plano |
 | `list_processes` | Lista os processos em segundo plano ativos |
 | `stop_process` | Encerra um processo em segundo plano |
+| `web_search` | Busca na web (DuckDuckGo) — opcional, ative em *Ajustes → Ferramentas* |
+| `fetch_url` | Lê o conteúdo de uma página web a partir de uma URL |
 
 ### Execução inteligente de processos
 - **Servidores/APIs não travam o chat.** Quando você pede para subir um servidor (`npm run dev`, `node app.js`, etc.), ele é detectado automaticamente — por padrão de log ("listening on…") ou por ociosidade — e passa a rodar **em segundo plano**, retornando um PID. O agente continua livre para rodar outros comandos (testar a API, `curl`, etc.) enquanto o servidor está de pé.

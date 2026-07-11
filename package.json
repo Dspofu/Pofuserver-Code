@@ -1,15 +1,24 @@
 {
   "name": "cliai",
   "version": "1.0.0",
-  "description": "",
+  "description": "Pofuserver Coder Studio — agente de código em desktop (Electron) que se conecta a qualquer API REST compatível com OpenAI (llama.cpp, Ollama, vLLM, etc.). O agente lê, escreve e apaga arquivos do workspace, executa comandos no terminal com gerenciamento inteligente de processos em segundo plano (sobe servidores/APIs sem travar o chat), aceita anexos de arquivos e renderiza respostas em Markdown com realce de código.",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron --no-sandbox . --ozone-platform=x11"
   },
-  "keywords": [],
+  "keywords": [
+    "code-agent",
+    "ai-agent",
+    "electron",
+    "openai-compatible",
+    "llm",
+    "llama.cpp",
+    "developer-tools",
+    "coding-assistant"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
     "electron": "^43.1.0",
     "openai": "^6.46.0"

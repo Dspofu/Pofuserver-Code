@@ -67,8 +67,8 @@ Todas as bibliotecas de front-end (Markdown, sanitização, realce de sintaxe, e
 
 ```bash
 # 1. Clone o repositório
-git clone <url-do-repositorio> pofuserver-coder-studio
-cd pofuserver-coder-studio
+git clone https://github.com/Dspofu/Pofuserver-Code.git
+cd Pofuserver-Code
 
 # 2. Instale as dependências (baixa o Electron)
 npm install

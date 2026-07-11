@@ -1,2 +1,9 @@
 /node_modules
 package-lock.json
+
+# Pasta de Build versionado
+/dist
+
+# Logs
+*.log
+npm-debug.log*

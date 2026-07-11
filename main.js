@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { dirname, join } from 'path';
-import { readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
@@ -13,6 +13,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 600,
+    icon: join(__dirname, 'assets', 'icon.png'), // usado no Linux/Windows em desenvolvimento (empacotado usa o ícone do build)
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -57,7 +58,13 @@ ipcMain.handle('read-file', async (event, filePath) => {
 });
 
 ipcMain.handle('write-file', async (event, filePath, content) => {
+  mkdirSync(dirname(filePath), { recursive: true }); // cria as pastas pai se não existirem
   writeFileSync(filePath, content, 'utf-8');
+  return { success: true };
+});
+
+ipcMain.handle('create-directory', async (event, dirPath) => {
+  mkdirSync(dirPath, { recursive: true });
   return { success: true };
 });
 
@@ -236,8 +243,139 @@ ipcMain.handle('save-store', async (event, data) => {
   }
 });
 
-ipcMain.handle('set-title', async (event, tile) => {
-  const webContents = event.sender;
-  const win = BrowserWindow.fromWebContents(webContents);
-  win.setTitle(`${app.getVersion()}v${app.getName()} - ${title}`);
+// Atualiza o título da janela (ex.: "Pofuserver Coder Studio — pensando…")
+ipcMain.on('set-title', (event, title) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win && typeof title === 'string' && title.trim()) win.setTitle(title);
+});
+
+// ==========================================================================
+//  Busca na web (DuckDuckGo, sem chave de API) + leitura de páginas
+// ==========================================================================
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+// Cabeçalhos "de navegador" reduzem os bloqueios anti-bot do DuckDuckGo
+const WEB_HEADERS = {
+  'User-Agent': WEB_UA,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Referer': 'https://duckduckgo.com/',
+  'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'same-origin'
+};
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/gi, "'")
+    .replace(/&#x2F;/gi, '/').replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+}
+function stripTags(s) { return String(s).replace(/<[^>]*>/g, ''); }
+
+// Extrai a URL real do redirecionador do DuckDuckGo (//duckduckgo.com/l/?uddg=...)
+function ddgRealUrl(href) {
+  const m = href.match(/[?&]uddg=([^&]+)/);
+  if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }
+  if (href.startsWith('//')) return 'https:' + href;
+  return href;
+}
+
+function parseDdgResults(html, max) {
+  const results = [];
+  const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snipRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippets = [];
+  let m;
+  while ((m = snipRe.exec(html)) !== null) snippets.push(decodeEntities(stripTags(m[1])).trim());
+  let i = 0;
+  while ((m = linkRe.exec(html)) !== null && results.length < max) {
+    results.push({
+      title: decodeEntities(stripTags(m[2])).trim(),
+      url: ddgRealUrl(m[1]),
+      snippet: snippets[i] || ''
+    });
+    i++;
+  }
+  return results;
+}
+
+// Busca no HTML do DuckDuckGo com retry/backoff (o DDG responde 202 quando limita por taxa)
+async function ddgHtmlSearch(query, max) {
+  const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query) + '&kl=br-pt';
+  const backoffs = [0, 1500, 3200]; // tenta 3x, esperando mais a cada bloqueio
+  for (const wait of backoffs) {
+    if (wait) await sleep(wait);
+    let resp;
+    try { resp = await fetch(url, { headers: WEB_HEADERS }); } catch (e) { continue; }
+    const html = await resp.text();
+    const blocked = resp.status === 202 || /anomaly|challenge|unusual traffic|If this error persists/i.test(html);
+    if (!blocked) {
+      const results = parseDdgResults(html, max);
+      if (results.length) return results;
+    }
+  }
+  return null; // bloqueado ou sem resultados após as tentativas
+}
+
+// Fallback: API oficial de Instant Answer do DuckDuckGo (JSON, não bloqueia — mas só dá resumos)
+async function ddgInstantAnswer(query, max) {
+  try {
+    const resp = await fetch('https://api.duckduckgo.com/?q=' + encodeURIComponent(query) +
+      '&format=json&no_html=1&no_redirect=1&t=pofuserver', { headers: { 'User-Agent': WEB_UA } });
+    const j = await resp.json();
+    const results = [];
+    if (j.AbstractText) results.push({ title: j.Heading || query, url: j.AbstractURL || '', snippet: j.AbstractText });
+    if (j.Answer) results.push({ title: 'Resposta direta', url: j.AbstractURL || '', snippet: String(j.Answer) });
+    for (const t of (j.RelatedTopics || [])) {
+      const items = t.Topics ? t.Topics : [t];
+      for (const it of items) {
+        if (it.Text && results.length < max) {
+          results.push({ title: it.Text.split(/ - | — /)[0].slice(0, 80), url: it.FirstURL || '', snippet: it.Text });
+        }
+      }
+    }
+    return results.slice(0, max);
+  } catch (e) { return null; }
+}
+
+ipcMain.handle('web-search', async (event, query, maxResults = 5) => {
+  const max = Math.min(Math.max(maxResults || 5, 1), 10);
+  try {
+    let results = await ddgHtmlSearch(query, max);
+    let source = 'duckduckgo';
+    if (!results || !results.length) {
+      results = await ddgInstantAnswer(query, max); // recorre ao resumo oficial
+      source = 'duckduckgo-instant';
+    }
+    if (!results || !results.length) {
+      return { success: false, error: 'Sem resultados — o DuckDuckGo pode ter limitado as requisições temporariamente. Tente novamente em alguns segundos.' };
+    }
+    return { success: true, query, source, count: results.length, results };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Converte HTML em texto legível (remove scripts/estilos/tags, normaliza espaços)
+function htmlToText(html) {
+  return decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<(br|\/p|\/div|\/li|\/h[1-6])>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+  ).replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim();
+}
+
+ipcMain.handle('fetch-url', async (event, url, maxChars = 8000) => {
+  try {
+    const resp = await fetch(url, { headers: { 'User-Agent': WEB_UA }, redirect: 'follow' });
+    const ct = resp.headers.get('content-type') || '';
+    let text = await resp.text();
+    if (ct.includes('html') || /^\s*</.test(text)) text = htmlToText(text);
+    return { success: true, url, status: resp.status, content: text.slice(0, maxChars) };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });

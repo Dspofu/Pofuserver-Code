@@ -11,8 +11,11 @@ const DEFAULT_SETTINGS = {
   topP: 0.9,
   maxTokens: 2048,
   noThink: false, // modelos de raciocínio (ex: Qwen3) precisam pensar para chamar ferramentas
-  cmdTimeout: 20 // segundos até um comando ser considerado "rodando em segundo plano"
+  cmdTimeout: 20, // segundos até um comando ser considerado "rodando em segundo plano"
+  webSearch: false // habilita as ferramentas de busca na web (web_search / fetch_url)
 };
+
+const APP_NAME = 'Pofuserver Coder Studio';
 
 const MAX_TOOL_RESULT_CHARS = 6000; // evita estourar o contexto de modelos pequenos
 // Trava de segurança ALTA apenas contra loop verdadeiramente infinito; o controle
@@ -36,9 +39,26 @@ function stopAgent() {
   if (abortController) { try { abortController.abort(); } catch (e) {} }
 }
 
+// "Grudar no fim": só acompanha o final se o usuário já estiver perto do fim.
+// Se ele rolar para cima (para ler), paramos de puxar — mesmo durante o streaming.
+let stickToBottom = true;
 function scrollChat() {
+  if (!stickToBottom) return;
   const cb = document.getElementById('chat-box');
   cb.scrollTop = cb.scrollHeight;
+}
+// Força ir ao fim e reativa o acompanhamento (ex.: ao enviar mensagem ou trocar de chat)
+function forceScrollBottom() {
+  stickToBottom = true;
+  const cb = document.getElementById('chat-box');
+  if (cb) cb.scrollTop = cb.scrollHeight;
+}
+
+// Atualiza o título da janela: "Pofuserver Coder Studio — <status>" (ou só o nome quando ocioso)
+function setAppTitle(status) {
+  const title = status ? `${APP_NAME} — ${status}` : APP_NAME;
+  document.title = title;
+  if (window.electronAPI && window.electronAPI.setTitle) window.electronAPI.setTitle(title);
 }
 
 // --------------------------------------------------------------------------
@@ -137,6 +157,7 @@ function renderActiveChat() {
 
   const chatBox = document.getElementById('chat-box');
   chatBox.innerHTML = '';
+  stickToBottom = true; // ao (re)carregar/trocar de chat, começa acompanhando o fim
 
   // Indexa os resultados de ferramenta por tool_call_id para parear com suas chamadas
   const toolResults = {};
@@ -149,7 +170,10 @@ function renderActiveChat() {
     if (msg.role === 'user') {
       renderUserMessage(msg.content, msg.attachments, i);
     } else if (msg.role === 'assistant') {
-      if (msg.content) appendMessage(msg.content, 'agent', i);
+      if (msg.content) {
+        const div = appendMessage(msg.content, 'agent', i);
+        if (msg.stats) renderMsgStats(div, msg.stats);
+      }
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
           const name = (tc.function && tc.function.name) || 'ferramenta';
@@ -282,7 +306,8 @@ function appendMessage(text, sender, index) {
     msgDiv.innerText = text; // mensagens do usuário sempre como texto puro
   }
   chatBox.appendChild(msgDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
+  return msgDiv;
 }
 
 // Bolha do usuário, com chips de anexos (usada ao vivo e no reload do histórico)
@@ -309,7 +334,7 @@ function renderUserMessage(text, attachments, index) {
   }
   attachMsgAction(msgDiv, 'edit', index);
   chatBox.appendChild(msgDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 // Barra de ações da mensagem (aparece no hover): editar (usuário) / regenerar (agente)
@@ -369,7 +394,7 @@ function appendInfo(text) {
   msgDiv.className = "info";
   msgDiv.innerText = text;
   chatBox.appendChild(msgDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 function logSystem(text) {
@@ -378,7 +403,7 @@ function logSystem(text) {
   logDiv.className = 'system-log';
   logDiv.innerText = `[SISTEMA]: ${text}`;
   chatBox.appendChild(logDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 function appendToolLog(text) {
@@ -387,7 +412,7 @@ function appendToolLog(text) {
   div.className = 'tool-log';
   div.innerText = text;
   chatBox.appendChild(div);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 // ---- Cards de ferramenta (exibição amigável, sem JSON cru) ----
@@ -395,11 +420,14 @@ const TOOL_META = {
   list_files:          { icon: '📁', label: 'Listar arquivos' },
   read_file:           { icon: '📄', label: 'Ler arquivo' },
   write_file:          { icon: '✏️', label: 'Escrever arquivo' },
+  create_directory:    { icon: '📂', label: 'Criar pasta' },
   delete_file:         { icon: '🗑️', label: 'Apagar arquivo' },
   execute_command:     { icon: '⌘', label: 'Terminal' },
   read_process_output: { icon: '📜', label: 'Saída do processo' },
   list_processes:      { icon: '📋', label: 'Processos' },
-  stop_process:        { icon: '⛔', label: 'Parar processo' }
+  stop_process:        { icon: '⛔', label: 'Parar processo' },
+  web_search:          { icon: '🔎', label: 'Buscar na web' },
+  fetch_url:           { icon: '🌐', label: 'Ler página' }
 };
 
 // Resumo legível dos argumentos da chamada
@@ -410,10 +438,13 @@ function summarizeToolCall(name, args) {
     case 'read_file':
     case 'write_file':
     case 'delete_file':         return args.filename || '';
+    case 'create_directory':    return (args.dirname || '') + '/';
     case 'list_files':          return args.subpath ? args.subpath + '/' : './';
     case 'read_process_output':
     case 'stop_process':        return 'PID ' + (args.pid ?? '?');
     case 'list_processes':      return '';
+    case 'web_search':          return '🔎 ' + (args.query || '');
+    case 'fetch_url':           return args.url || '';
     default: {
       const keys = Object.keys(args);
       return keys.map(k => `${k}: ${String(args[k]).slice(0, 60)}`).join('  ');
@@ -451,8 +482,16 @@ function summarizeToolResult(name, resultStr) {
         ? (data.map(f => (f.isDirectory ? '📁 ' : '📄 ') + f.name).join('\n') || '(pasta vazia)')
         : resultStr;
     case 'write_file':  return data.success ? '✓ Arquivo salvo' : (data.error || resultStr);
+    case 'create_directory': return data.success ? '✓ Pasta criada' : (data.error || resultStr);
     case 'delete_file': return data.success ? '✓ Arquivo apagado' : (data.error || resultStr);
     case 'stop_process':return data.success ? `✓ Processo ${data.pid} encerrado` : (data.error || resultStr);
+    case 'web_search':
+      if (!data.success) return `⚠ ${data.error || 'falha na busca'}`;
+      if (!data.results || !data.results.length) return '(nenhum resultado)';
+      return data.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
+    case 'fetch_url':
+      if (!data.success) return `⚠ ${data.error || 'falha ao baixar'}`;
+      return `[${data.status}] ${data.url}\n\n${(data.content || '').slice(0, 1000)}${(data.content || '').length > 1000 ? '…' : ''}`;
     case 'list_processes':
       return Array.isArray(data)
         ? (data.length ? data.map(p => `PID ${p.pid} · ${p.status} · ${p.uptimeSec}s · ${p.command}`).join('\n') : '(nenhum processo em segundo plano)')
@@ -490,7 +529,7 @@ function appendToolCall(name, args) {
   }
 
   chatBox.appendChild(card);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
   return card;
 }
 
@@ -506,7 +545,7 @@ function fillToolResult(card, name, resultStr) {
   const text = summarizeToolResult(name, resultStr);
   res.innerText = truncate(text, 1200);
   res.classList.toggle('is-error', /^⚠/.test(text));
-  document.getElementById('chat-box').scrollTop = document.getElementById('chat-box').scrollHeight;
+  scrollChat();
 }
 
 // Card completo (chamada + resultado) — usado ao recarregar o histórico
@@ -528,7 +567,7 @@ function appendReasoning(text) {
   details.appendChild(summary);
   details.appendChild(body);
   chatBox.appendChild(details);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 function appendError(text) {
@@ -537,7 +576,7 @@ function appendError(text) {
   div.className = 'error-msg';
   div.innerText = `⚠ ${text}`;
   chatBox.appendChild(div);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 function showTyping() {
@@ -547,7 +586,7 @@ function showTyping() {
   div.id = 'typing-indicator';
   div.innerHTML = '<span></span><span></span><span></span>';
   chatBox.appendChild(div);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
 }
 
 function hideTyping() {
@@ -603,6 +642,20 @@ const tools = [
           content: { type: 'string', description: 'Conteúdo completo a ser escrito no arquivo' }
         },
         required: ['filename', 'content']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_directory',
+      description: 'Cria uma pasta (e as pastas pai necessárias) no workspace.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dirname: { type: 'string', description: 'Caminho relativo da pasta a criar (ex: src/components)' }
+        },
+        required: ['dirname']
       }
     }
   },
@@ -676,6 +729,46 @@ const tools = [
   }
 ];
 
+// Ferramentas de web — incluídas só quando a busca na web está ativada nas configurações
+const webTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Pesquisa na web (DuckDuckGo) e retorna uma lista de resultados (título, URL e resumo). ' +
+        'Use para obter informações atuais, documentação ou referências que você não conhece.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Termos de busca' },
+          max_results: { type: 'number', description: 'Quantidade de resultados (1-10, padrão 5)' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch_url',
+      description: 'Baixa uma página da web e retorna seu conteúdo em texto legível. ' +
+        'Use para ler o conteúdo de um resultado retornado por web_search.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'URL completa da página a ler' }
+        },
+        required: ['url']
+      }
+    }
+  }
+];
+
+// Monta a lista de ferramentas disponíveis conforme as configurações
+function activeTools() {
+  return state.settings.webSearch ? [...tools, ...webTools] : tools;
+}
+
 async function runTool(name, args, workspace) {
   try {
     if (name === 'list_files') {
@@ -689,6 +782,10 @@ async function runTool(name, args, workspace) {
     }
     if (name === 'write_file') {
       const res = await window.electronAPI.writeFile(`${workspace}/${args.filename}`, args.content ?? '');
+      return JSON.stringify(res);
+    }
+    if (name === 'create_directory') {
+      const res = await window.electronAPI.createDirectory(`${workspace}/${args.dirname}`);
       return JSON.stringify(res);
     }
     if (name === 'delete_file') {
@@ -712,6 +809,14 @@ async function runTool(name, args, workspace) {
       const res = await window.electronAPI.stopProcess(args.pid);
       return JSON.stringify(res);
     }
+    if (name === 'web_search') {
+      const res = await window.electronAPI.webSearch(args.query, args.max_results || 5);
+      return truncate(JSON.stringify(res), MAX_TOOL_RESULT_CHARS);
+    }
+    if (name === 'fetch_url') {
+      const res = await window.electronAPI.fetchUrl(args.url, 8000);
+      return truncate(JSON.stringify(res), MAX_TOOL_RESULT_CHARS);
+    }
     return `Ferramenta desconhecida: ${name}`;
   } catch (err) {
     return JSON.stringify({ error: err.message });
@@ -732,6 +837,7 @@ async function submitUserMessage(userPrompt, attachments) {
   const userMsg = { role: 'user', content: userPrompt };
   if (attachments && attachments.length) userMsg.attachments = attachments;
   chat.messages.push(userMsg);
+  forceScrollBottom(); // ao enviar, volta ao fim e reativa o acompanhamento
   renderUserMessage(userPrompt, attachments, chat.messages.length - 1);
 
   await runAgent();
@@ -759,6 +865,7 @@ async function runAgent() {
     // Garante que o input SEMPRE destrave, mesmo se algo estourar no meio do loop
     isRunning = false;
     updateInputState();
+    setAppTitle(''); // volta o título ao nome do app
     await persist();
   }
 }
@@ -784,6 +891,8 @@ async function streamChatCompletion({ apiUrl, apiKey, payload, signal, onContent
   let content = '', reasoning = '';
   const toolAcc = [];
   let usage = null, finishReason = null, aborted = false, apiError = null;
+  const startedAt = performance.now();
+  let firstTokenAt = 0; // tempo até o primeiro token (TTFT)
 
   try {
     while (true) {
@@ -804,6 +913,7 @@ async function streamChatCompletion({ apiUrl, apiKey, payload, signal, onContent
         const choice = json.choices && json.choices[0];
         if (!choice) continue;
         const delta = choice.delta || {};
+        if ((delta.reasoning_content || delta.content) && !firstTokenAt) firstTokenAt = performance.now();
         if (delta.reasoning_content) { reasoning += delta.reasoning_content; onReasoning && onReasoning(reasoning); }
         if (delta.content) { content += delta.content; onContent && onContent(content); }
         if (delta.tool_calls) {
@@ -824,10 +934,48 @@ async function streamChatCompletion({ apiUrl, apiKey, payload, signal, onContent
   }
 
   const tool_calls = toolAcc.filter(Boolean);
+  const endedAt = performance.now();
+  const timing = {
+    totalMs: endedAt - startedAt,
+    ttftMs: firstTokenAt ? firstTokenAt - startedAt : 0,
+    genMs: firstTokenAt ? endedAt - firstTokenAt : 0 // tempo de geração (após o 1º token)
+  };
   return {
     message: { role: 'assistant', content, reasoning_content: reasoning, tool_calls: tool_calls.length ? tool_calls : undefined },
-    usage, finishReason, aborted, apiError
+    usage, finishReason, aborted, apiError, timing
   };
+}
+
+// Calcula as métricas exibidas abaixo da resposta (velocidade, tokens, tempo)
+function buildResponseStats(usage, timing) {
+  if (!timing) return null;
+  const completion = usage ? (usage.completion_tokens || 0) : 0;
+  const genSec = timing.genMs > 0 ? timing.genMs / 1000 : 0;
+  const tps = (completion > 0 && genSec > 0) ? completion / genSec : 0;
+  return {
+    tps: Math.round(tps * 10) / 10,
+    completion,
+    prompt: usage ? (usage.prompt_tokens || 0) : 0,
+    total: usage ? (usage.total_tokens || 0) : 0,
+    totalSec: Math.round((timing.totalMs / 1000) * 10) / 10,
+    ttftSec: Math.round((timing.ttftMs / 1000) * 10) / 10
+  };
+}
+
+// Renderiza a linha de métricas abaixo de uma bolha do agente
+function renderMsgStats(msgDiv, stats) {
+  if (!msgDiv || !stats) return;
+  const parts = [];
+  if (stats.tps > 0) parts.push(`${stats.tps} tok/s`);
+  if (stats.completion > 0) parts.push(`${stats.completion} tokens gerados`);
+  if (stats.totalSec > 0) parts.push(`${stats.totalSec}s`);
+  if (stats.ttftSec > 0) parts.push(`${stats.ttftSec}s até 1º token`);
+  if (stats.total > 0) parts.push(`${stats.total} tkn no contexto`);
+  if (!parts.length) return;
+  const bar = document.createElement('div');
+  bar.className = 'msg-stats';
+  bar.innerText = parts.join('  ·  ');
+  msgDiv.appendChild(bar);
 }
 
 // Bolha de agente vazia para receber texto em streaming; retorna o .md-body
@@ -839,7 +987,7 @@ function createLiveAgentBody() {
   body.className = 'md-body';
   msgDiv.appendChild(body);
   chatBox.appendChild(msgDiv);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
   return body;
 }
 
@@ -856,7 +1004,7 @@ function createLiveReasoning() {
   details.appendChild(summary);
   details.appendChild(body);
   chatBox.appendChild(details);
-  chatBox.scrollTop = chatBox.scrollHeight;
+  scrollChat();
   return { details, summary, body };
 }
 
@@ -869,7 +1017,12 @@ async function agentTurns(chat) {
     `O diretório de trabalho atual é: ${chat.path}. ` +
     `Use as ferramentas fornecidas para interagir com o ambiente. ` +
     `Responda em português. Quando a tarefa estiver concluída, responda ao usuário sem chamar mais ferramentas.`;
+  if (state.settings.webSearch) {
+    systemContent += ` Você também pode pesquisar na web com web_search e ler páginas com fetch_url quando precisar de informação atual ou externa.`;
+  }
   if (noThink) systemContent += ' /no_think';
+
+  const toolset = activeTools();
 
   await persist();
 
@@ -879,17 +1032,20 @@ async function agentTurns(chat) {
     if (stopRequested) break;
     iterations++;
     showTyping();
+    setAppTitle('pensando…');
 
     // Elementos de streaming (criados sob demanda quando o primeiro token chega)
     let liveBody = null, liveReason = null;
     const onReasoning = (full) => {
       hideTyping();
+      setAppTitle('pensando…');
       if (!liveReason) liveReason = createLiveReasoning();
       liveReason.body.innerText = full;
       scrollChat();
     };
     const onContent = (full) => {
       hideTyping();
+      setAppTitle('gerando resposta…');
       if (!liveBody) liveBody = createLiveAgentBody();
       liveBody.innerText = full; // texto puro enquanto digita; markdown ao finalizar
       scrollChat();
@@ -903,7 +1059,7 @@ async function agentTurns(chat) {
         payload: {
           model,
           messages: [{ role: 'system', content: systemContent }, ...toApiMessages(chat.messages)],
-          tools, tool_choice: 'auto', temperature, top_p: topP, max_tokens: maxTokens
+          tools: toolset, tool_choice: 'auto', temperature, top_p: topP, max_tokens: maxTokens
         },
         signal: abortController.signal,
         onContent, onReasoning
@@ -932,20 +1088,25 @@ async function agentTurns(chat) {
 
     // Se foi interrompido, NÃO guarda tool_calls (ficariam órfãos, sem resposta → erro no próximo turno)
     const hasContent = !!(message.content && message.content.trim());
+    const stats = buildResponseStats(result.usage, result.timing);
     const stored = { role: 'assistant', content: message.content || '' };
     if (!aborted && message.tool_calls && message.tool_calls.length > 0) stored.tool_calls = message.tool_calls;
 
     if (hasContent || stored.tool_calls) {
+      if (hasContent && stats) stored.stats = stats; // guarda métricas para reexibir no reload
       chat.messages.push(stored);
       const assistantIndex = chat.messages.length - 1;
       if (hasContent) {
-        // Finaliza a bolha: re-renderiza como markdown e adiciona o botão de regenerar
+        // Finaliza a bolha: re-renderiza como markdown, adiciona botão de regenerar e as métricas
+        const bubble = liveBody ? liveBody.parentElement : null;
         if (liveBody) {
           renderMarkdownInto(liveBody, message.content);
-          liveBody.parentElement.classList.remove('streaming');
-          attachMsgAction(liveBody.parentElement, 'regenerate', assistantIndex);
+          bubble.classList.remove('streaming');
+          attachMsgAction(bubble, 'regenerate', assistantIndex);
+          renderMsgStats(bubble, stats);
         } else {
-          appendMessage(message.content, 'agent', assistantIndex);
+          const div = appendMessage(message.content, 'agent', assistantIndex);
+          renderMsgStats(div, stats);
         }
         maybeRenameChat(chat);
       } else if (liveBody) {
@@ -985,6 +1146,7 @@ async function agentTurns(chat) {
           logSystem(`Argumentos inválidos para ${name}, usando vazio.`);
         }
         const card = appendToolCall(name, args);
+        setAppTitle(`executando: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
         result = await runTool(name, args, chat.path);
         fillToolResult(card, name, result);
       }
@@ -1149,29 +1311,6 @@ function renderUsage() {
   const pill = document.getElementById('ctx-pill');
   pill.classList.toggle('warn', pct >= 70 && pct < 90);
   pill.classList.toggle('danger', pct >= 90);
-
-  // Gráfico de barras de tokens gerados
-  const chart = document.getElementById('usage-chart');
-  chart.innerHTML = '';
-  const max = Math.max(1, ...u.history);
-  if (u.history.length === 0) {
-    chart.innerHTML = '<span class="chart-label">Sem dados ainda.</span>';
-    return;
-  }
-  u.history.forEach((val, i) => {
-    const col = document.createElement('div');
-    col.className = 'chart-column';
-    const bar = document.createElement('div');
-    bar.className = 'chart-bar';
-    bar.style.height = `${Math.round((val / max) * 100)}%`;
-    bar.title = `${val} tokens`;
-    const label = document.createElement('span');
-    label.className = 'chart-label';
-    label.innerText = `#${i + 1}`;
-    col.appendChild(bar);
-    col.appendChild(label);
-    chart.appendChild(col);
-  });
 }
 
 // --------------------------------------------------------------------------
@@ -1252,6 +1391,7 @@ function applySettingsToForm() {
   document.getElementById('input-maxtokens').value = s.maxTokens;
   document.getElementById('input-cmdtimeout').value = s.cmdTimeout;
   document.getElementById('check-nothink').checked = s.noThink;
+  document.getElementById('check-websearch').checked = s.webSearch;
 }
 
 function readSettingsFromForm() {
@@ -1263,12 +1403,19 @@ function readSettingsFromForm() {
   state.settings.maxTokens = parseInt(document.getElementById('input-maxtokens').value, 10) || DEFAULT_SETTINGS.maxTokens;
   state.settings.cmdTimeout = parseInt(document.getElementById('input-cmdtimeout').value, 10) || DEFAULT_SETTINGS.cmdTimeout;
   state.settings.noThink = document.getElementById('check-nothink').checked;
+  state.settings.webSearch = document.getElementById('check-websearch').checked;
 }
 
 // --------------------------------------------------------------------------
 //  Ligação de eventos da interface
 // --------------------------------------------------------------------------
 function wireEvents() {
+  // Detecta se o usuário está perto do fim: se rolar para cima, paramos de acompanhar
+  const chatBox = document.getElementById('chat-box');
+  chatBox.addEventListener('scroll', () => {
+    stickToBottom = (chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight) < 80;
+  });
+
   // Selecionar pasta de trabalho (diálogo nativo real do Electron)
   document.getElementById('btn-select-folder').addEventListener('click', async () => {
     const folderPath = await window.electronAPI.selectFolder();

@@ -127,10 +127,15 @@ Modelos com suporte a **function calling** (chamadas de ferramenta) são recomen
 
 ---
 
+## Créditos
+
+- Ícone do aplicativo gerado com **ChatGPT (OpenAI)**.
+
 ## Notas
 
 - O histórico e as configurações são salvos no diretório de dados do usuário do Electron (`app-store.json`).
 - O app foi construído e testado principalmente no **Linux**, contra um servidor **llama.cpp** local.
+- A **busca na web** usa o DuckDuckGo (sem chave de API) e é opcional — ative em *Ajustes → Ferramentas*.
 - A dependência `openai` consta no `package.json`, mas a comunicação é feita via `fetch` direto ao endpoint compatível.
 
 ---

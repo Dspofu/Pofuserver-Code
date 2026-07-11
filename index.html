@@ -902,6 +902,60 @@
       .message, .message.user, .message.agent,
       .tool-card, .tool-log, .reasoning { max-width: 100%; }
     }
+
+    /* ===== Métricas abaixo da resposta do agente ===== */
+    .msg-stats {
+      margin-top: 8px;
+      font-size: 0.68rem;
+      color: var(--muted-2);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      letter-spacing: 0.01em;
+    }
+
+    /* ===== Painel de configurações repaginado ===== */
+    .modal-content { height: 540px; max-height: 92vh; }
+    .cfg-section { margin-bottom: 22px; }
+    .cfg-section:last-child { margin-bottom: 4px; }
+    .cfg-section-title {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin-bottom: 12px; padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .cfg-hint { font-size: 0.7rem; color: var(--muted-2); line-height: 1.4; }
+    .cfg-hint code {
+      font-family: ui-monospace, monospace; font-size: 0.9em;
+      background: var(--surface-3); padding: 1px 5px; border-radius: 4px; color: var(--text);
+    }
+
+    /* Stat tiles do uso de tokens */
+    .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .stat-tile {
+      background: var(--surface-3); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px; text-align: center;
+    }
+    .stat-num { font-size: 1.25rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+    .stat-cap { font-size: 0.66rem; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+
+    /* Linha com switch (toggle) */
+    .switch-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 12px 0; border-top: 1px solid var(--border);
+    }
+    .cfg-section .switch-row:first-of-type { border-top: none; }
+    .switch-text { display: flex; flex-direction: column; gap: 3px; }
+    .switch-title { font-size: 0.85rem; color: var(--text); font-weight: 500; }
+    .switch { position: relative; flex-shrink: 0; width: 42px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch-slider {
+      position: absolute; inset: 0; cursor: pointer; border-radius: 999px;
+      background: var(--surface-3); border: 1px solid var(--border-2); transition: all 0.18s ease;
+    }
+    .switch-slider::before {
+      content: ''; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px;
+      border-radius: 50%; background: #a1a1aa; transition: all 0.18s ease;
+    }
+    .switch input:checked + .switch-slider { background: var(--accent); border-color: var(--accent); }
+    .switch input:checked + .switch-slider::before { transform: translateX(18px); background: #fff; }
   </style>
 </head>
 <body>
@@ -985,96 +1039,111 @@
       
       <div class="modal-container-tabs">
         <div class="modal-nav-sidebar">
-          <button class="nav-tab-btn active" data-tab="tab-geral">Geral</button>
-          <button class="nav-tab-btn" data-tab="tab-uso">Uso</button>
-          <button class="nav-tab-btn" data-tab="tab-personalizacao">Personalização</button>
+          <button class="nav-tab-btn active" data-tab="tab-geral">Visão geral</button>
+          <button class="nav-tab-btn" data-tab="tab-personalizacao">Ajustes</button>
         </div>
 
         <div class="modal-body">
+          <!-- VISÃO GERAL: modelo + uso -->
           <div id="tab-geral" class="tab-panel active">
-            <div class="config-group">
-              <label>Informações Ativas do Modelo</label>
+            <div class="cfg-section">
+              <div class="cfg-section-title">Modelo ativo</div>
               <div class="info-grid">
-                <div class="info-card"><div class="info-label">Nome do Modelo</div><div class="info-value" id="info-model-name">—</div></div>
+                <div class="info-card"><div class="info-label">Nome</div><div class="info-value" id="info-model-name">—</div></div>
                 <div class="info-card"><div class="info-label">Quantização</div><div class="info-value" id="info-model-quant">—</div></div>
-                <div class="info-card"><div class="info-label">Comprimento Contexto</div><div class="info-value" id="info-model-ctx">—</div></div>
+                <div class="info-card"><div class="info-label">Contexto</div><div class="info-value" id="info-model-ctx">—</div></div>
                 <div class="info-card"><div class="info-label">Tamanho</div><div class="info-value" id="info-model-size">—</div></div>
                 <div class="info-card"><div class="info-label">Parâmetros</div><div class="info-value" id="info-model-params">—</div></div>
                 <div class="info-card"><div class="info-label">Servidor</div><div class="info-value" id="info-model-owner">—</div></div>
               </div>
-              <span id="info-model-status" style="font-size:0.75rem;color:#71717a;">Abra as configurações para carregar os dados do endpoint.</span>
+              <span id="info-model-status" class="cfg-hint">Abra as configurações para carregar os dados do endpoint.</span>
             </div>
-          </div>
 
-          <div id="tab-uso" class="tab-panel">
-            <div class="config-group">
-              <label>Uso de Tokens (sessão atual)</label>
-              <div class="info-grid">
-                <div class="info-card"><div class="info-label">Prompt</div><div class="info-value" id="usage-prompt">0</div></div>
-                <div class="info-card"><div class="info-label">Geração</div><div class="info-value" id="usage-completion">0</div></div>
-                <div class="info-card"><div class="info-label">Total</div><div class="info-value" id="usage-total">0</div></div>
-                <div class="info-card"><div class="info-label">Requisições</div><div class="info-value" id="usage-requests">0</div></div>
-              </div>
-            </div>
-            <div class="config-group">
-              <label>Contexto usado na última requisição</label>
+            <div class="cfg-section">
+              <div class="cfg-section-title">Contexto — última requisição</div>
               <div class="credit-box">
                 <div class="credit-header"><span id="ctx-label">0 / 0 tkn</span><span id="ctx-percent">0%</span></div>
                 <div class="progress-bar-bg"><div class="progress-bar-fill" id="ctx-fill" style="width: 0%;"></div></div>
               </div>
             </div>
-            <div class="chart-container">
-              <label style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#a1a1aa;">Tokens gerados por requisição</label>
-              <div class="bar-chart" id="usage-chart">
-                <span class="chart-label">Sem dados ainda.</span>
+
+            <div class="cfg-section">
+              <div class="cfg-section-title">Uso de tokens — sessão atual</div>
+              <div class="stat-row">
+                <div class="stat-tile"><div class="stat-num" id="usage-prompt">0</div><div class="stat-cap">Prompt</div></div>
+                <div class="stat-tile"><div class="stat-num" id="usage-completion">0</div><div class="stat-cap">Geração</div></div>
+                <div class="stat-tile"><div class="stat-num" id="usage-total">0</div><div class="stat-cap">Total</div></div>
+                <div class="stat-tile"><div class="stat-num" id="usage-requests">0</div><div class="stat-cap">Requisições</div></div>
               </div>
             </div>
           </div>
 
+          <!-- AJUSTES: conexão + geração + ferramentas -->
           <div id="tab-personalizacao" class="tab-panel">
-            <div class="config-group">
-              <label for="api-url">Endpoint da API (compatível com OpenAI)</label>
-              <input type="text" id="api-url" value="http://localhost:8080/v1">
-            </div>
-            <div class="config-group">
-              <label for="model-name">Modelo</label>
-              <select id="model-name" style="padding:10px 12px;border-radius:6px;border:1px solid #3f3f46;background:#27272a;color:#f4f4f5;font-size:0.85rem;outline:none;">
-                <option value="">(carregando...)</option>
-              </select>
-              <button id="btn-refresh-models" class="btn-icon" style="align-self:flex-start;font-size:0.75rem;padding:6px 10px;">Recarregar modelos</button>
-            </div>
-            <div class="config-group">
-              <label for="api-key">API Key (opcional)</label>
-              <input type="text" id="api-key" placeholder="Deixe vazio para servidores locais" value="">
-            </div>
-            <div class="config-group">
-              <label for="range-temp">Temperatura</label>
-              <div class="range-container">
-                <input type="range" id="range-temp" min="0" max="2" step="0.1" value="0.7" oninput="this.nextElementSibling.innerText = this.value">
-                <span class="range-value">0.7</span>
+            <div class="cfg-section">
+              <div class="cfg-section-title">Conexão</div>
+              <div class="config-group">
+                <label for="api-url">Endpoint da API (compatível com OpenAI)</label>
+                <input type="text" id="api-url" value="http://localhost:8080/v1">
+              </div>
+              <div class="config-group">
+                <label for="model-name">Modelo</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <select id="model-name" style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid var(--border-2);background:var(--surface-3);color:var(--text);font-size:0.85rem;outline:none;">
+                    <option value="">(carregando...)</option>
+                  </select>
+                  <button id="btn-refresh-models" class="btn-icon" style="font-size:0.75rem;padding:8px 12px;white-space:nowrap;">Recarregar</button>
+                </div>
+              </div>
+              <div class="config-group">
+                <label for="api-key">API Key (opcional)</label>
+                <input type="text" id="api-key" placeholder="Deixe vazio para servidores locais" value="">
               </div>
             </div>
-            <div class="config-group">
-              <label for="range-topp">Top P</label>
-              <div class="range-container">
-                <input type="range" id="range-topp" min="0" max="1" step="0.05" value="0.9" oninput="this.nextElementSibling.innerText = this.value">
-                <span class="range-value">0.9</span>
+
+            <div class="cfg-section">
+              <div class="cfg-section-title">Geração</div>
+              <div class="config-group">
+                <label for="range-temp">Temperatura</label>
+                <div class="range-container">
+                  <input type="range" id="range-temp" min="0" max="2" step="0.1" value="0.7" oninput="this.nextElementSibling.innerText = this.value">
+                  <span class="range-value">0.7</span>
+                </div>
+              </div>
+              <div class="config-group">
+                <label for="range-topp">Top P</label>
+                <div class="range-container">
+                  <input type="range" id="range-topp" min="0" max="1" step="0.05" value="0.9" oninput="this.nextElementSibling.innerText = this.value">
+                  <span class="range-value">0.9</span>
+                </div>
+              </div>
+              <div class="config-group">
+                <label for="input-maxtokens">Máximo de tokens por resposta</label>
+                <input type="text" id="input-maxtokens" value="2048">
+              </div>
+              <div class="switch-row">
+                <div class="switch-text">
+                  <span class="switch-title">Desativar raciocínio (/no_think)</span>
+                  <span class="cfg-hint">Mais rápido, mas modelos de raciocínio (Qwen3) podem parar de chamar ferramentas.</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="check-nothink"><span class="switch-slider"></span></label>
               </div>
             </div>
-            <div class="config-group">
-              <label for="input-maxtokens">Máximo de tokens por resposta</label>
-              <input type="text" id="input-maxtokens" value="2048">
-            </div>
-            <div class="config-group">
-              <label for="input-cmdtimeout">Timeout de comando (segundos)</label>
-              <input type="text" id="input-cmdtimeout" value="20">
-              <span style="font-size:0.7rem;color:#71717a;">Após esse tempo, comandos contínuos (servidores/APIs) passam a rodar em segundo plano e o chat é liberado.</span>
-            </div>
-            <div class="config-group">
-              <label style="display:flex;align-items:center;gap:8px;text-transform:none;cursor:pointer;">
-                <input type="checkbox" id="check-nothink" style="accent-color:#007acc;width:16px;height:16px;">
-                Desativar raciocínio do modelo (/no_think) — mais rápido, mas modelos de raciocínio (Qwen3) podem parar de chamar ferramentas
-              </label>
+
+            <div class="cfg-section">
+              <div class="cfg-section-title">Ferramentas</div>
+              <div class="switch-row">
+                <div class="switch-text">
+                  <span class="switch-title">Busca na web</span>
+                  <span class="cfg-hint">Habilita as ferramentas <code>web_search</code> e <code>fetch_url</code> (via DuckDuckGo) para o agente pesquisar e ler páginas.</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="check-websearch"><span class="switch-slider"></span></label>
+              </div>
+              <div class="config-group">
+                <label for="input-cmdtimeout">Timeout de comando (segundos)</label>
+                <input type="text" id="input-cmdtimeout" value="20">
+                <span class="cfg-hint">Após esse tempo, comandos contínuos (servidores/APIs) passam a rodar em segundo plano e o chat é liberado.</span>
+              </div>
             </div>
           </div>
         </div>

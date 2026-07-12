@@ -21,6 +21,7 @@
     "coding-assistant"
   ],
   "author": "Dspofu",
+  "githubUrl": "https://github.com/Dspofu/Pofuserver-Code",
   "license": "MIT",
   "type": "module",
   "dependencies": {
@@ -53,11 +54,15 @@
       ],
       "category": "Development",
       "maintainer": "Dspofu",
+      "executableArgs": [
+        "--no-sandbox",
+        "--ozone-platform=x11"
+      ],
       "icon": "assets/icon.png"
     },
     "deb": {
       "depends": [
-        "libgtk-3-0",
+        "libgtk-3-0 | libgtk-3-0t64",
         "libnotify4",
         "libnss3",
         "libxss1",

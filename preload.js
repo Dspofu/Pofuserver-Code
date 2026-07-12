@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readProcessOutput: (pid) => ipcRenderer.invoke('read-process-output', pid),
   listProcesses: () => ipcRenderer.invoke('list-processes'),
   stopProcess: (pid) => ipcRenderer.invoke('stop-process', pid),
+  clearFinishedProcesses: () => ipcRenderer.invoke('clear-finished-processes'),
+  getAppInfo: () => ipcRenderer.invoke('get-app-info'),
   webSearch: (query, maxResults) => ipcRenderer.invoke('web-search', query, maxResults),
   fetchUrl: (url, maxChars) => ipcRenderer.invoke('fetch-url', url, maxChars),
   loadStore: () => ipcRenderer.invoke('load-store'),

@@ -12,7 +12,8 @@ const DEFAULT_SETTINGS = {
   maxTokens: 2048,
   noThink: false, // modelos de raciocínio (ex: Qwen3) precisam pensar para chamar ferramentas
   cmdTimeout: 20, // segundos até um comando ser considerado "rodando em segundo plano"
-  webSearch: false // habilita as ferramentas de busca na web (web_search / fetch_url)
+  webSearch: false, // habilita as ferramentas de busca na web (web_search / fetch_url)
+  execMode: 'manual' // 'manual' pede confirmação antes de rodar comandos; 'auto' executa direto
 };
 
 const APP_NAME = 'Pofuserver Coder Studio';
@@ -36,7 +37,199 @@ let abortController = null;   // aborta o fetch em streaming em andamento
 
 function stopAgent() {
   stopRequested = true;
+  if (pendingConfirm) resolveConfirm('reject'); // fecha o modal de confirmação, se aberto
   if (abortController) { try { abortController.abort(); } catch (e) {} }
+}
+
+// ---- Confirmação de execução (modo manual) ----
+let pendingConfirm = null;
+const CONFIRM_TOOLS = { execute_command: true, delete_file: true };
+
+// Retorna 'approve' | 'reject' (e pode alternar para 'auto' via "sempre permitir")
+async function maybeConfirmTool(name, args) {
+  if (stopRequested) return 'reject'; // usuário já pediu para parar
+  if (!CONFIRM_TOOLS[name] || state.settings.execMode !== 'manual') return 'approve';
+  const decision = await askExecConfirm(name, args);
+  if (decision === 'always') {
+    state.settings.execMode = 'auto';
+    updateExecModeUI();
+    persist();
+    return 'approve';
+  }
+  return decision; // 'approve' | 'reject'
+}
+
+function askExecConfirm(name, args) {
+  return new Promise((resolve) => {
+    pendingConfirm = { resolve };
+    showConfirmModal(name, args);
+  });
+}
+
+function resolveConfirm(decision) {
+  hideConfirmModal();
+  if (pendingConfirm) {
+    const done = pendingConfirm.resolve;
+    pendingConfirm = null;
+    done(decision);
+  }
+}
+
+function showConfirmModal(name, args) {
+  const modal = document.getElementById('confirm-modal');
+  const label = document.getElementById('confirm-label');
+  const cmd = document.getElementById('confirm-command');
+  if (name === 'execute_command') {
+    label.innerText = 'Executar comando no terminal?';
+    cmd.innerText = '$ ' + (args.command || '');
+  } else if (name === 'delete_file') {
+    label.innerText = 'Apagar arquivo?';
+    cmd.innerText = '🗑 ' + (args.filename || '');
+  } else {
+    label.innerText = 'Confirmar ação?';
+    cmd.innerText = JSON.stringify(args);
+  }
+  modal.classList.add('active');
+  const ok = document.getElementById('confirm-approve');
+  if (ok) ok.focus();
+}
+
+function hideConfirmModal() {
+  const modal = document.getElementById('confirm-modal');
+  if (modal) modal.classList.remove('active');
+}
+
+function updateExecModeUI() {
+  document.querySelectorAll('#exec-mode .exec-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === state.settings.execMode);
+  });
+}
+
+// ---- Painel de processos ativos (etapa 4) ----
+let processList = [];
+const procOutputTimers = {}; // pid -> intervalId dos "Ver saída" abertos
+
+async function refreshProcesses() {
+  try { processList = await window.electronAPI.listProcesses(); }
+  catch (e) { processList = []; }
+  const running = processList.filter(p => p.status === 'running').length;
+  const badge = document.getElementById('proc-badge');
+  const btn = document.getElementById('btn-processes');
+  if (badge) { badge.innerText = running; badge.style.display = running > 0 ? 'flex' : 'none'; }
+  if (btn) btn.classList.toggle('has-active', running > 0);
+  const modal = document.getElementById('processes-modal');
+  if (modal && modal.classList.contains('active')) renderProcessList();
+}
+
+// Guarda as linhas já criadas por PID para reaproveitá-las (NÃO recriar a cada refresh,
+// senão o <pre> de saída aberto é destruído e o polling perde o alvo — bug do "some").
+const procRows = {}; // pid -> { row, dot, meta, out, viewBtn, stopBtn }
+
+function buildProcRow(p) {
+  const row = document.createElement('div');
+  row.className = 'proc-row';
+
+  const head = document.createElement('div');
+  head.className = 'proc-head';
+  const dot = document.createElement('span');
+  const cmd = document.createElement('span');
+  cmd.className = 'proc-cmd'; cmd.innerText = p.command; cmd.title = p.command;
+  head.append(dot, cmd);
+
+  const meta = document.createElement('div');
+  meta.className = 'proc-meta';
+
+  const out = document.createElement('pre');
+  out.className = 'proc-output'; out.style.display = 'none';
+
+  const actions = document.createElement('div');
+  actions.className = 'proc-actions';
+  const viewBtn = document.createElement('button');
+  viewBtn.className = 'proc-btn'; viewBtn.innerText = 'Ver saída';
+  viewBtn.addEventListener('click', () => toggleProcOutput(p.pid, out, viewBtn));
+  const stopBtn = document.createElement('button');
+  stopBtn.className = 'proc-btn danger'; stopBtn.innerText = 'Parar';
+  stopBtn.addEventListener('click', () => stopProc(p.pid));
+  actions.append(viewBtn, stopBtn);
+
+  row.append(head, meta, actions, out);
+  return { row, dot, meta, out, viewBtn, stopBtn };
+}
+
+function renderProcessList() {
+  const container = document.getElementById('proc-list');
+  if (!container) return;
+
+  if (!processList.length) {
+    container.innerHTML = '';
+    for (const k in procRows) delete procRows[k];
+    const empty = document.createElement('div');
+    empty.className = 'proc-empty';
+    empty.innerText = 'Nenhum processo foi iniciado nesta sessão.';
+    container.appendChild(empty);
+    return;
+  }
+  const placeholder = container.querySelector('.proc-empty');
+  if (placeholder) placeholder.remove();
+
+  const seen = new Set();
+  const sorted = [...processList].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
+  for (const p of sorted) {
+    seen.add(String(p.pid));
+    let r = procRows[p.pid];
+    if (!r) { r = buildProcRow(p); procRows[p.pid] = r; }
+    // atualiza no lugar (sem destruir o <pre> de saída que possa estar aberto)
+    r.dot.className = 'proc-status ' + (p.status === 'running' ? 'running' : p.status === 'stopped' ? 'stopped' : 'exited');
+    r.meta.innerText = `PID ${p.pid} · ${p.status} · ${p.uptimeSec}s`;
+    r.stopBtn.disabled = p.status !== 'running';
+    container.appendChild(r.row); // (re)posiciona mantendo running primeiro
+  }
+  // remove as linhas cujos processos sumiram do registro
+  for (const pid in procRows) {
+    if (!seen.has(pid)) {
+      if (procOutputTimers[pid]) { clearInterval(procOutputTimers[pid]); delete procOutputTimers[pid]; }
+      procRows[pid].row.remove();
+      delete procRows[pid];
+    }
+  }
+}
+
+async function toggleProcOutput(pid, outEl, btn) {
+  if (procOutputTimers[pid]) { // já aberto → fecha
+    clearInterval(procOutputTimers[pid]); delete procOutputTimers[pid];
+    outEl.style.display = 'none'; btn.innerText = 'Ver saída';
+    return;
+  }
+  outEl.style.display = 'block'; btn.innerText = 'Ocultar saída';
+  const poll = async () => {
+    const res = await window.electronAPI.readProcessOutput(pid);
+    if (res && res.success) {
+      const txt = [(res.stdout || ''), (res.stderr || '')].filter(x => x.trim()).join('\n');
+      const atBottom = outEl.scrollHeight - outEl.scrollTop - outEl.clientHeight < 30;
+      outEl.innerText = txt || '(sem saída ainda)';
+      if (atBottom) outEl.scrollTop = outEl.scrollHeight;
+    } else {
+      outEl.innerText = (res && res.error) || 'processo não encontrado';
+    }
+  };
+  await poll();
+  procOutputTimers[pid] = setInterval(poll, 1000); // acompanha a saída em tempo real
+}
+
+async function stopProc(pid) {
+  if (procOutputTimers[pid]) { clearInterval(procOutputTimers[pid]); delete procOutputTimers[pid]; }
+  await window.electronAPI.stopProcess(pid);
+  await refreshProcesses();
+}
+
+function openProcessesModal() {
+  document.getElementById('processes-modal').classList.add('active');
+  refreshProcesses();
+}
+
+function closeProcessesModal() {
+  document.getElementById('processes-modal').classList.remove('active');
+  for (const pid in procOutputTimers) { clearInterval(procOutputTimers[pid]); delete procOutputTimers[pid]; }
 }
 
 // "Grudar no fim": só acompanha o final se o usuário já estiver perto do fim.
@@ -112,21 +305,92 @@ function renderChatList() {
     const nameSpan = document.createElement('span');
     nameSpan.className = 'chat-name';
     nameSpan.innerText = chat.name;
+    nameSpan.title = 'Duplo clique para renomear';
+    nameSpan.addEventListener('dblclick', (e) => { e.stopPropagation(); beginRenameChat(id, nameSpan); });
     item.appendChild(nameSpan);
 
+    const actions = document.createElement('div');
+    actions.className = 'chat-item-actions';
+
+    const rename = document.createElement('button');
+    rename.className = 'chat-action';
+    rename.title = 'Renomear chat';
+    rename.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+    rename.addEventListener('click', (e) => { e.stopPropagation(); beginRenameChat(id, nameSpan); });
+    actions.appendChild(rename);
+
     const del = document.createElement('button');
-    del.className = 'chat-delete';
+    del.className = 'chat-action chat-delete';
     del.title = 'Apagar chat';
     del.innerText = '×';
     del.addEventListener('click', (e) => {
       e.stopPropagation();
       deleteChat(id);
     });
-    item.appendChild(del);
+    actions.appendChild(del);
+    item.appendChild(actions);
 
     item.addEventListener('click', () => switchChat(id));
     container.appendChild(item);
   });
+}
+
+// Renomeia um chat com edição inline no próprio item da lista
+function beginRenameChat(id, nameSpan) {
+  const chat = state.chats[id];
+  if (!chat) return;
+  const input = document.createElement('input');
+  input.className = 'chat-rename-input';
+  input.value = chat.name;
+  nameSpan.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const commit = (save) => {
+    if (done) return;
+    done = true;
+    if (save) {
+      const v = input.value.trim();
+      if (v) { chat.name = v; persist(); }
+    }
+    renderChatList();
+    if (id === state.activeChatId) document.getElementById('active-chat-title').innerText = state.chats[id].name;
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+    if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+  });
+  input.addEventListener('blur', () => commit(true));
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+// Renomeia o chat ativo pelo título do cabeçalho (duplo clique)
+function renameActiveChat() {
+  const titleEl = document.getElementById('active-chat-title');
+  const chat = activeChat();
+  if (!chat || titleEl.querySelector('input')) return;
+  const input = document.createElement('input');
+  input.className = 'chat-rename-input header-rename';
+  input.value = chat.name;
+  titleEl.innerHTML = '';
+  titleEl.appendChild(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = (save) => {
+    if (done) return;
+    done = true;
+    if (save) { const v = input.value.trim(); if (v) { chat.name = v; persist(); } }
+    titleEl.innerText = chat.name;
+    renderChatList();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+    if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+  });
+  input.addEventListener('blur', () => commit(true));
 }
 
 function switchChat(id) {
@@ -237,6 +501,14 @@ function renderMarkdownInto(container, text) {
   }
   const rawHtml = window.marked.parse(text);
   container.innerHTML = window.DOMPurify.sanitize(rawHtml);
+
+  // Todo link do Markdown deve abrir no navegador padrão do sistema, nunca dentro do app.
+  // target="_blank" faz o clique passar pelo setWindowOpenHandler do main.js (que abre
+  // externamente e nega a navegação interna).
+  container.querySelectorAll('a[href]').forEach(a => {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  });
 
   // Realça e decora cada bloco de código
   container.querySelectorAll('pre > code').forEach(codeEl => {
@@ -599,6 +871,14 @@ function truncate(str, max) {
   return str.length > max ? str.slice(0, max) + `\n… (truncado, ${str.length} caracteres)` : str;
 }
 
+// Recorta pelo MEIO preservando início e fim (o erro costuma estar no fim da saída)
+function clipMiddle(str, max) {
+  str = String(str || '');
+  if (str.length <= max) return str;
+  const head = Math.floor(max * 0.35), tail = max - head;
+  return str.slice(0, head) + `\n…[${str.length - max} caracteres omitidos]…\n` + str.slice(-tail);
+}
+
 // --------------------------------------------------------------------------
 //  Definição das Ferramentas expostas ao modelo
 // --------------------------------------------------------------------------
@@ -795,11 +1075,29 @@ async function runTool(name, args, workspace) {
     if (name === 'execute_command') {
       const timeoutMs = (state.settings.cmdTimeout || 25) * 1000;
       const res = await window.electronAPI.executeCommand(args.command, workspace, { timeoutMs });
-      return truncate(JSON.stringify(res), MAX_TOOL_RESULT_CHARS);
+      // Monta um resultado LIMITADO priorizando erro/exit/stderr (senão um stdout
+      // gigante empurraria o motivo da falha para fora do limite e o modelo não o veria).
+      const bounded = {
+        command: res.command,
+        finished: res.finished,
+        backgrounded: res.backgrounded || undefined,
+        pid: res.pid,
+        reason: res.reason,
+        exitCode: res.exitCode,
+        error: res.error || undefined,
+        note: res.note,
+        stderr: clipMiddle(res.stderr || '', 2500) || undefined,
+        stdout: clipMiddle(res.stdout || '', 3000) || undefined
+      };
+      return JSON.stringify(bounded);
     }
     if (name === 'read_process_output') {
       const res = await window.electronAPI.readProcessOutput(args.pid);
-      return truncate(JSON.stringify(res), MAX_TOOL_RESULT_CHARS);
+      if (res && res.success) {
+        res.stderr = clipMiddle(res.stderr || '', 2500) || undefined;
+        res.stdout = clipMiddle(res.stdout || '', 3000) || undefined;
+      }
+      return JSON.stringify(res);
     }
     if (name === 'list_processes') {
       const res = await window.electronAPI.listProcesses();
@@ -854,6 +1152,7 @@ async function runAgent() {
   isRunning = true;
   stopRequested = false;
   updateInputState();
+  refreshModelContext(); // atualiza n_ctx/infos do modelo a cada requisição (não bloqueia)
 
   try {
     await agentTurns(chat);
@@ -867,7 +1166,18 @@ async function runAgent() {
     updateInputState();
     setAppTitle(''); // volta o título ao nome do app
     await persist();
+    // Se o agente terminou deixando processos rodando, avisa (o usuário pode precisar encerrá-los)
+    await refreshProcesses();
+    const running = processList.filter(p => p.status === 'running').length;
+    if (running > 0) {
+      logSystem(`${running} processo(s) ainda em execução em segundo plano — veja/encerre no painel de processos (ícone no topo).`);
+    }
   }
+}
+
+async function clearFinishedProcesses() {
+  await window.electronAPI.clearFinishedProcesses();
+  await refreshProcesses();
 }
 
 // Chamada em STREAMING (SSE): dispara os callbacks conforme o texto chega e
@@ -1013,12 +1323,17 @@ async function agentTurns(chat) {
   const { apiUrl, model, apiKey, temperature, topP, maxTokens, noThink } = state.settings;
 
   let systemContent =
-    `Você é um assistente de desenvolvimento com acesso direto aos arquivos do projeto local. ` +
-    `O diretório de trabalho atual é: ${chat.path}. ` +
-    `Use as ferramentas fornecidas para interagir com o ambiente. ` +
-    `Responda em português. Quando a tarefa estiver concluída, responda ao usuário sem chamar mais ferramentas.`;
+    `Você é um assistente de desenvolvimento sênior com acesso direto aos arquivos do projeto local. ` +
+    `O diretório de trabalho atual é: ${chat.path}. Responda em português.\n\n` +
+    `PRINCÍPIOS DE TRABALHO:\n` +
+    `1. Investigue antes de agir: use list_files e read_file para entender a estrutura, convenções e o estilo do projeto ANTES de criar ou alterar código. Não presuma nomes de arquivos, dependências ou frameworks — verifique.\n` +
+    `2. Passos pequenos e verificados: faça uma mudança de cada vez e confirme o resultado (rode testes/linters/o próprio programa com execute_command) antes de prosseguir. Se um comando falhar, LEIA o stderr/exit code retornado e corrija a causa — não repita o mesmo comando.\n` +
+    `3. Código idiomático: siga as convenções já presentes no projeto (indentação, nomes, padrões). Prefira editar arquivos existentes a recriá-los; leia o arquivo antes de sobrescrevê-lo para não perder conteúdo.\n` +
+    `4. Ferramentas de arquivo: use write_file (cria as pastas pai automaticamente), create_directory, read_file e delete_file em vez de comandos de shell equivalentes quando possível — é mais seguro e claro.\n` +
+    `5. Processos longos: servidores/APIs (execute_command que não termina) rodam em segundo plano e retornam um PID. Continue trabalhando; verifique se subiu com read_process_output(pid) e encerre com stop_process(pid) quando não precisar mais. Evite sudo e comandos interativos.\n` +
+    `6. Seja explícito sobre suposições e limitações. Quando a tarefa estiver concluída, responda ao usuário com um resumo objetivo do que foi feito, sem chamar mais ferramentas.`;
   if (state.settings.webSearch) {
-    systemContent += ` Você também pode pesquisar na web com web_search e ler páginas com fetch_url quando precisar de informação atual ou externa.`;
+    systemContent += `\n7. Informação externa/atual: use web_search para pesquisar e fetch_url para ler o conteúdo de um resultado antes de citá-lo. Não invente URLs nem dados que você não verificou.`;
   }
   if (noThink) systemContent += ' /no_think';
 
@@ -1146,9 +1461,18 @@ async function agentTurns(chat) {
           logSystem(`Argumentos inválidos para ${name}, usando vazio.`);
         }
         const card = appendToolCall(name, args);
-        setAppTitle(`executando: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
-        result = await runTool(name, args, chat.path);
-        fillToolResult(card, name, result);
+        // Modo manual: pede confirmação para ações que executam/apagam
+        const decision = await maybeConfirmTool(name, args);
+        if (decision === 'reject') {
+          result = JSON.stringify({ rejected: true, error: 'O usuário rejeitou esta ação. Não a repita; aguarde novas instruções ou proponha uma alternativa.' });
+          fillToolResult(card, name, result);
+          logSystem(`Ação rejeitada pelo usuário: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
+        } else {
+          setAppTitle(`executando: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
+          result = await runTool(name, args, chat.path);
+          fillToolResult(card, name, result);
+          refreshProcesses(); // atualiza o painel de processos (pode ter subido/encerrado algo)
+        }
       }
 
       chat.messages.push({
@@ -1377,6 +1701,23 @@ function updateModelInfo(model) {
   renderUsage();
 }
 
+// Atualiza silenciosamente os dados do modelo (n_ctx etc.) direto do endpoint,
+// sem mexer no dropdown — chamado a cada nova requisição para manter o contexto fresco.
+async function refreshModelContext() {
+  const { apiUrl, apiKey, model } = state.settings;
+  if (!model) return;
+  try {
+    const headers = {};
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    const res = await fetch(`${apiUrl}/models`, { headers });
+    if (!res.ok) return;
+    const json = await res.json();
+    const models = json.data || [];
+    const m = models.find(x => x.id === model) || models[0];
+    if (m) updateModelInfo(m);
+  } catch (e) { /* silencioso: não atrapalha o envio */ }
+}
+
 // --------------------------------------------------------------------------
 //  Configurações (formulário do modal)
 // --------------------------------------------------------------------------
@@ -1521,6 +1862,49 @@ function wireEvents() {
   document.getElementById('model-name').addEventListener('change', (e) => {
     state.settings.model = e.target.value;
   });
+
+  // Toggle Auto/Manual de execução de comandos
+  document.getElementById('exec-mode').addEventListener('click', (e) => {
+    const opt = e.target.closest('.exec-opt');
+    if (!opt) return;
+    state.settings.execMode = opt.dataset.mode;
+    updateExecModeUI();
+    persist();
+  });
+
+  // Modal de confirmação de execução
+  document.getElementById('confirm-approve').addEventListener('click', () => resolveConfirm('approve'));
+  document.getElementById('confirm-always').addEventListener('click', () => resolveConfirm('always'));
+  document.getElementById('confirm-reject').addEventListener('click', () => resolveConfirm('reject'));
+  document.getElementById('confirm-modal').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); resolveConfirm('approve'); }
+    if (e.key === 'Escape') { e.preventDefault(); resolveConfirm('reject'); }
+  });
+
+  // Painel de processos
+  document.getElementById('btn-processes').addEventListener('click', openProcessesModal);
+  document.getElementById('btn-close-processes').addEventListener('click', closeProcessesModal);
+  document.getElementById('btn-clear-finished').addEventListener('click', clearFinishedProcesses);
+
+  // Renomear o chat ativo pelo título do cabeçalho (duplo clique)
+  document.getElementById('active-chat-title').addEventListener('dblclick', renameActiveChat);
+
+  // Botão do GitHub (abre a URL do package.json no navegador externo via window.open,
+  // que passa pelo setWindowOpenHandler do main.js)
+  document.getElementById('btn-github').addEventListener('click', () => {
+    if (appInfo.githubUrl) window.open(appInfo.githubUrl, '_blank');
+  });
+
+  // Atualiza o contador de processos periodicamente (badge no cabeçalho)
+  setInterval(refreshProcesses, 3000);
+}
+
+// Informações do app (URL do GitHub etc.) lidas do package.json via IPC
+let appInfo = { githubUrl: '', version: '', name: '' };
+async function loadAppInfo() {
+  try { appInfo = await window.electronAPI.getAppInfo(); } catch (e) { /* ignora */ }
+  const gh = document.getElementById('btn-github');
+  if (gh) gh.style.display = appInfo.githubUrl ? '' : 'none'; // esconde se não houver URL configurada
 }
 
 // --------------------------------------------------------------------------
@@ -1533,6 +1917,9 @@ async function init() {
   renderActiveChat();
   renderAttachments();
   renderUsage();
+  updateExecModeUI();   // reflete o modo salvo (auto/manual)
+  refreshProcesses();   // popula o badge de processos
+  loadAppInfo();        // carrega URL do GitHub etc. do package.json
   // Tenta descobrir os modelos do endpoint padrão já na abertura
   fetchModels();
 }

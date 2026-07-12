@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } from 'electron';
 import { dirname, join } from 'path';
 import { readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from 'fs';
 import { spawn } from 'child_process';
@@ -24,6 +24,44 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
   // mainWindow.webContents.openDevTools()
+
+  // Links (ex: markdown gerado pela IA, target="_blank" ou window.open) nunca abrem
+  // dentro do app — sempre no navegador padrão do sistema.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  // Bloqueia qualquer navegação para fora do próprio index.html (cliques em <a> sem
+  // target, redirecionamentos etc.) e abre a URL no navegador externo em vez disso.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('file://') && url.includes('index.html')) return; // navegação interna legítima
+    event.preventDefault();
+    if (url.startsWith('http:') || url.startsWith('https:')) shell.openExternal(url);
+  });
+
+  // Menu de contexto nativo no clique direito (copiar/colar/selecionar), essencial
+  // para copiar textos das respostas. Também oferece abrir link no navegador externo.
+  mainWindow.webContents.on('context-menu', (event, params) => {
+    const items = [];
+    const { editFlags, selectionText, isEditable, linkURL } = params;
+    if (linkURL) {
+      items.push({ label: 'Abrir link no navegador', click: () => shell.openExternal(linkURL) });
+      items.push({ label: 'Copiar endereço do link', click: () => clipboard.writeText(linkURL) });
+      items.push({ type: 'separator' });
+    }
+    if (isEditable) {
+      items.push({ label: 'Desfazer', role: 'undo', enabled: editFlags.canUndo });
+      items.push({ label: 'Refazer', role: 'redo', enabled: editFlags.canRedo });
+      items.push({ type: 'separator' });
+      items.push({ label: 'Recortar', role: 'cut', enabled: editFlags.canCut });
+    }
+    items.push({ label: 'Copiar', role: 'copy', enabled: editFlags.canCopy || !!selectionText });
+    if (isEditable) items.push({ label: 'Colar', role: 'paste', enabled: editFlags.canPaste });
+    items.push({ type: 'separator' });
+    items.push({ label: 'Selecionar tudo', role: 'selectAll' });
+    Menu.buildFromTemplate(items).popup({ window: mainWindow });
+  });
 }
 
 app.whenReady().then(() => {
@@ -66,6 +104,20 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
 ipcMain.handle('create-directory', async (event, dirPath) => {
   mkdirSync(dirPath, { recursive: true });
   return { success: true };
+});
+
+// Informações do app lidas do package.json (ex: URL do GitHub, versão)
+ipcMain.handle('get-app-info', async () => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'));
+    return {
+      githubUrl: pkg.githubUrl || pkg.homepage || (pkg.repository && (pkg.repository.url || pkg.repository)) || '',
+      version: pkg.version || '',
+      name: pkg.productName || pkg.name || ''
+    };
+  } catch (e) {
+    return { githubUrl: '', version: '', name: '' };
+  }
 });
 
 ipcMain.handle('delete-file', async (event, filePath) => {
@@ -212,6 +264,14 @@ ipcMain.handle('stop-process', async (event, pid) => {
   } catch (err) {
     return { success: false, error: err.message };
   }
+});
+
+// Remove do registro os processos já encerrados (limpa o painel)
+ipcMain.handle('clear-finished-processes', async () => {
+  for (const [pid, e] of procs) {
+    if (e.status !== 'running') procs.delete(pid);
+  }
+  return { success: true };
 });
 
 // Ao fechar o app, encerra tudo que ficou rodando em segundo plano

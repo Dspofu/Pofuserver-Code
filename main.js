@@ -9,6 +9,8 @@ const __dirname = dirname(__filename);
 
 let mainWindow;
 
+app.setAppUserModelId("com.pofuserver.pofuserver-coder-studio")
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,

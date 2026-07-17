@@ -16,7 +16,10 @@ export const DEFAULT_SETTINGS = {
   apiKey: '',
   temperature: 0.7,
   topP: 0.9,
-  maxTokens: 2048,
+  // Modelos de raciocínio gastam boa parte do orçamento no bloco de think antes de
+  // emitir o tool_call; com folga de menos, a chamada é cortada no meio dos argumentos
+  // e chega com JSON quebrado (finish_reason 'length').
+  maxTokens: 8192,
   noThink: false, // modelos de raciocínio (ex: Qwen3) precisam pensar para chamar ferramentas
   cmdTimeout: 20, // segundos até um comando ser considerado "rodando em segundo plano"
   webSearch: false, // habilita as ferramentas de busca na web (web_search / fetch_url)
@@ -30,3 +33,9 @@ export const MAX_TOOL_RESULT_CHARS = 6000; // evita estourar o contexto de model
 // Trava de segurança ALTA apenas contra loop verdadeiramente infinito; o controle
 // real é o botão "Parar". Tarefas longas e legítimas rodam sem serem bloqueadas.
 export const MAX_LOOP_ITERATIONS = 100;
+
+// Tentativas por requisição. Um tool_call malformado faz o llama.cpp responder 500 e é
+// transitório (a geração é estocástica) — repetir costuma resolver, e sem isso a run
+// inteira do agente morre por causa de uma única resposta ruim.
+export const MAX_REQUEST_RETRIES = 3;
+export const REQUEST_RETRY_DELAY_MS = 800;

@@ -1,4 +1,4 @@
-import { APP_NAME, DEFAULT_SETTINGS, MAX_LOOP_ITERATIONS, MAX_TOOL_RESULT_CHARS, system_prompt } from "./constants.js";
+import { APP_NAME, DEFAULT_SETTINGS, MAX_LOOP_ITERATIONS, MAX_REQUEST_RETRIES, MAX_TOOL_RESULT_CHARS, REQUEST_RETRY_DELAY_MS, system_prompt } from "./constants.js";
 
 let state = {
   chats: {},          // { id: { id, name, path, messages: [] } }
@@ -1331,25 +1331,44 @@ async function agentTurns(chat) {
       scrollChat();
     };
 
-    let result;
-    abortController = new AbortController();
-    try {
-      result = await streamChatCompletion({
-        apiUrl, apiKey,
-        payload: {
-          model,
-          messages: [{ role: 'system', content: systemContent }, ...toApiMessages(chat.messages)],
-          tools: toolset, tool_choice: 'auto', temperature, top_p: topP, max_tokens: maxTokens
-        },
-        signal: abortController.signal,
-        onContent, onReasoning
-      });
-    } catch (err) {
+    // Uma resposta ruim (ex.: tool_call malformado → 500 do llama.cpp) é transitória:
+    // tenta de novo em vez de encerrar a run inteira. Abort do usuário não lança —
+    // volta em result.aborted — então tudo que cai no catch é falha real.
+    let result = null, lastErr = null;
+    for (let attempt = 1; attempt <= MAX_REQUEST_RETRIES; attempt++) {
+      abortController = new AbortController();
+      try {
+        result = await streamChatCompletion({
+          apiUrl, apiKey,
+          payload: {
+            model,
+            messages: [{ role: 'system', content: systemContent }, ...toApiMessages(chat.messages)],
+            tools: toolset, tool_choice: 'auto', temperature, top_p: topP, max_tokens: maxTokens
+          },
+          signal: abortController.signal,
+          onContent, onReasoning
+        });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+      } finally {
+        abortController = null;
+      }
+      if (stopRequested) break;
+      if (attempt < MAX_REQUEST_RETRIES) {
+        logSystem(`Requisição falhou (tentativa ${attempt}/${MAX_REQUEST_RETRIES}): ${lastErr.message}. Tentando de novo…`);
+        if (liveReason) { liveReason.details.remove(); liveReason = null; } // descarta o parcial da tentativa perdida
+        if (liveBody) { liveBody.parentElement.remove(); liveBody = null; }
+        await new Promise(r => setTimeout(r, REQUEST_RETRY_DELAY_MS * attempt));
+        showTyping();
+      }
+    }
+
+    if (!result) {
       hideTyping();
-      appendError(`Falha na requisição: ${err.message}`);
+      appendError(`Falha na requisição: ${lastErr ? lastErr.message : 'interrompida'}`);
       break;
-    } finally {
-      abortController = null;
     }
 
     hideTyping();
@@ -1362,6 +1381,12 @@ async function agentTurns(chat) {
     trackUsage(result.usage);
     const message = result.message;
     const aborted = result.aborted || stopRequested;
+
+    // A API responde 200 mesmo quando corta no limite de tokens; sem este aviso o corte
+    // passa silencioso (e um tool_call cortado chega como JSON inválido logo abaixo).
+    if (result.finishReason === 'length' && !aborted) {
+      logSystem(`Resposta cortada no limite de ${maxTokens} tokens. Aumente "Máximo de tokens por resposta" nas configurações se isso se repetir.`);
+    }
 
     // Recolhe o bloco de raciocínio ao terminar
     if (liveReason) { liveReason.summary.innerText = 'Raciocínio do modelo'; setTimeout(() => liveReason.details.open = false, 500) }
@@ -1418,25 +1443,33 @@ async function agentTurns(chat) {
         result = JSON.stringify({ error: 'tool_call malformado (sem nome de função)' });
         appendToolLog(`⚠ tool_call ignorado (malformado)`);
       } else {
-        let args = {};
+        let args = null;
         try {
           args = fn.arguments ? JSON.parse(fn.arguments) : {};
         } catch (e) {
-          args = {};
-          logSystem(`Argumentos inválidos para ${name}, usando vazio.`);
+          args = null;
         }
-        const card = appendToolCall(name, args);
-        // Modo manual: pede confirmação para ações que executam/apagam
-        const decision = await maybeConfirmTool(name, args);
-        if (decision === 'reject') {
-          result = JSON.stringify({ rejected: true, error: 'O usuário rejeitou esta ação. Não a repita; aguarde novas instruções ou proponha uma alternativa.' });
-          fillToolResult(card, name, result);
-          logSystem(`Ação rejeitada pelo usuário: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
+
+        if (!args) {
+          // Argumentos cortados ou corrompidos. Executar assim mesmo chamaria a ferramenta
+          // com os campos undefined (write_file criaria um arquivo chamado "undefined"),
+          // então devolve o erro ao modelo para ele refazer a chamada.
+          result = JSON.stringify({ error: `Os argumentos de ${name} não são JSON válido — a chamada provavelmente foi cortada. Refaça a chamada com JSON completo; se o conteúdo for muito grande, divida em partes menores.` });
+          appendToolLog(`⚠ ${name}: argumentos inválidos, chamada não executada`);
         } else {
-          setAppTitle(`executando: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
-          result = await runTool(name, args, chat.path);
-          fillToolResult(card, name, result);
-          refreshProcesses(); // atualiza o painel de processos (pode ter subido/encerrado algo)
+          const card = appendToolCall(name, args);
+          // Modo manual: pede confirmação para ações que executam/apagam
+          const decision = await maybeConfirmTool(name, args);
+          if (decision === 'reject') {
+            result = JSON.stringify({ rejected: true, error: 'O usuário rejeitou esta ação. Não a repita; aguarde novas instruções ou proponha uma alternativa.' });
+            fillToolResult(card, name, result);
+            logSystem(`Ação rejeitada pelo usuário: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
+          } else {
+            setAppTitle(`executando: ${(TOOL_META[name] && TOOL_META[name].label) || name}`);
+            result = await runTool(name, args, chat.path);
+            fillToolResult(card, name, result);
+            refreshProcesses(); // atualiza o painel de processos (pode ter subido/encerrado algo)
+          }
         }
       }
 
@@ -1454,6 +1487,22 @@ async function agentTurns(chat) {
   if (iterations >= MAX_LOOP_ITERATIONS && state.settings.safetyInteractions) appendError(`Trava de segurança: ${MAX_LOOP_ITERATIONS} iterações seguidas. Se ainda precisava continuar, envie "continue".`);
 }
 
+// O servidor reparseia os arguments de TODO tool_call do histórico a cada requisição.
+// Um único arguments inválido (ex.: chamada cortada no limite de tokens) faz toda
+// requisição seguinte falhar com HTTP 500 — o chat trava de vez, e repetir não adianta
+// porque o erro vem do histórico, não da geração. Só sai daqui JSON parseável.
+function sanitizeToolCalls(toolCalls) {
+  return toolCalls.map(tc => {
+    const fn = (tc && tc.function) || {};
+    try {
+      JSON.parse(fn.arguments || '{}');
+      return tc;
+    } catch (e) {
+      return { ...tc, function: { ...fn, arguments: '{}' } };
+    }
+  });
+}
+
 // Monta o payload para o servidor: remove reasoning_content e expande anexos no conteúdo do usuário
 function toApiMessages(messages) {
   return messages.map(m => {
@@ -1463,7 +1512,7 @@ function toApiMessages(messages) {
     } else if (m.content !== undefined) {
       copy.content = m.content;
     }
-    if (m.tool_calls) copy.tool_calls = m.tool_calls;
+    if (m.tool_calls) copy.tool_calls = sanitizeToolCalls(m.tool_calls);
     if (m.tool_call_id) copy.tool_call_id = m.tool_call_id;
     if (m.name) copy.name = m.name;
     return copy;

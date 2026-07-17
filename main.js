@@ -9,7 +9,10 @@ const __dirname = dirname(__filename);
 
 let mainWindow;
 
-app.setAppUserModelId("com.pofuserver.pofuserver-coder-studio")
+// Precisa ser idêntico ao "build.appId" do package.json: o instalador NSIS grava esse
+// mesmo AUMID no atalho, e o Windows só associa a janela ao atalho (ícone correto na
+// barra de tarefas + fixar) quando os dois valores batem.
+app.setAppUserModelId("com.dspofu.pofusercoderstudio")
 
 function createWindow() {
   mainWindow = new BrowserWindow({

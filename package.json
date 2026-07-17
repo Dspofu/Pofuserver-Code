@@ -58,7 +58,10 @@
         "--no-sandbox",
         "--ozone-platform=x11"
       ],
-      "icon": "assets/icon.png"
+      "icon": "build/icons",
+      "desktop": {
+        "StartupWMClass": "pofuserver-coder-studio"
+      }
     },
     "deb": {
       "depends": [
@@ -74,7 +77,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "assets/icon.png"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,

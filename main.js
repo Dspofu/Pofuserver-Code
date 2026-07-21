@@ -7,6 +7,10 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// No Windows não existe /bin/bash nem grupos de processos no sentido POSIX; várias
+// rotinas de terminal precisam de tratamento específico por plataforma.
+const isWindows = process.platform === 'win32';
+
 let mainWindow;
 
 // Precisa ser idêntico ao "build.appId" do package.json: o instalador NSIS grava esse
@@ -130,6 +134,36 @@ ipcMain.handle('delete-file', async (event, filePath) => {
   return { success: true };
 });
 
+// Lista recursiva dos ARQUIVOS do workspace, usada pelo autocomplete de menção (@arquivo).
+// Ignora pastas pesadas/geradas e limita a quantidade para não travar projetos gigantes.
+const MENTION_IGNORE = new Set([
+  'node_modules', 'dist', 'build', 'out', '.next', '.nuxt', 'coverage', '.cache',
+  'vendor', '__pycache__', '.venv', 'venv', 'target', 'bin', 'obj', '.git'
+]);
+const MENTION_FILE_CAP = 5000;
+
+ipcMain.handle('list-tree', async (event, rootPath) => {
+  const files = [];
+  const walk = (dir, rel) => {
+    if (files.length >= MENTION_FILE_CAP) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const ent of entries) {
+      if (files.length >= MENTION_FILE_CAP) return;
+      const relPath = rel ? `${rel}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        // pula pastas ignoradas e ocultas (.git, .idea, etc.), mas mantém arquivos ocultos
+        if (ent.name.startsWith('.') || MENTION_IGNORE.has(ent.name)) continue;
+        walk(join(dir, ent.name), relPath);
+      } else if (ent.isFile()) {
+        files.push(relPath);
+      }
+    }
+  };
+  try { walk(rootPath, ''); } catch (e) { /* ignora */ }
+  return { files, capped: files.length >= MENTION_FILE_CAP };
+});
+
 // ==========================================================================
 //  Execução de comandos com gerenciamento inteligente de processos
 // ==========================================================================
@@ -152,6 +186,27 @@ function appendCapped(entry, key, chunk) {
   if (entry[key].length > LOG_CAP) entry[key] = entry[key].slice(-LOG_CAP);
 }
 
+// Shell por plataforma. No Windows usamos o cmd.exe (ComSpec); no restante, /bin/bash.
+// Antes isto era fixo em '/bin/bash', o que fazia o spawn falhar no Windows com
+// "spawn /bin/bash ENOENT" — o executável simplesmente não existe lá.
+const SHELL = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/bash';
+
+// Encerra um processo E TODA a sua árvore de filhos, de forma multiplataforma.
+//  - POSIX: mata o grupo de processos inteiro (pid negativo), possível porque o
+//    processo foi criado com `detached: true` (vira líder do próprio grupo).
+//  - Windows: `process.kill(-pid)` lança erro (não há grupos POSIX); usamos
+//    `taskkill /T` que derruba o processo e todos os descendentes.
+function killTree(pid, { force = false } = {}) {
+  if (!pid) return;
+  if (isWindows) {
+    const args = ['/pid', String(pid), '/T'];
+    if (force) args.push('/F');
+    try { spawn('taskkill', args, { windowsHide: true }); } catch (e) { /* ignora */ }
+  } else {
+    try { process.kill(-pid, force ? 'SIGKILL' : 'SIGTERM'); } catch (e) { /* ignora */ }
+  }
+}
+
 ipcMain.handle('execute-command', async (event, command, cwd, opts = {}) => {
   const hardTimeoutMs = opts.timeoutMs || 25000; // teto absoluto para tarefas que terminam
   const idleMs = opts.idleMs || 2500;            // silêncio => provável servidor ocioso esperando conexões
@@ -164,7 +219,8 @@ ipcMain.handle('execute-command', async (event, command, cwd, opts = {}) => {
     let child;
     try {
       child = spawn(command, {
-        cwd, shell: '/bin/bash', detached: true,
+        cwd, shell: SHELL, detached: true,
+        windowsHide: true, // no Windows, evita piscar uma janela de console a cada comando
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', FORCE_COLOR: '0' }
       });
@@ -262,8 +318,8 @@ ipcMain.handle('list-processes', async () => {
 ipcMain.handle('stop-process', async (event, pid) => {
   const entry = procs.get(pid);
   try {
-    process.kill(-pid, 'SIGTERM'); // mata o grupo inteiro (pid negativo = process group)
-    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch (e) {} }, 3000);
+    killTree(pid);                                       // pedido educado (SIGTERM / taskkill sem /F)
+    setTimeout(() => killTree(pid, { force: true }), 3000); // força se ainda estiver vivo
     if (entry) entry.status = 'stopped';
     return { success: true, pid };
   } catch (err) {
@@ -281,9 +337,7 @@ ipcMain.handle('clear-finished-processes', async () => {
 
 // Ao fechar o app, encerra tudo que ficou rodando em segundo plano
 app.on('before-quit', () => {
-  for (const [pid] of procs) {
-    try { process.kill(-pid, 'SIGTERM'); } catch (e) { /* ignora */ }
-  }
+  for (const [pid] of procs) killTree(pid, { force: true });
 });
 
 // Persistência local (chats e configurações) no diretório de dados do usuário

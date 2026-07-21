@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   listFiles: (dirPath) => ipcRenderer.invoke('list-files', dirPath),
+  listTree: (rootPath) => ipcRenderer.invoke('list-tree', rootPath),
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
   writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
   createDirectory: (dirPath) => ipcRenderer.invoke('create-directory', dirPath),

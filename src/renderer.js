@@ -570,7 +570,7 @@ function renderUserMessage(text, attachments, index) {
     attachments.forEach(a => {
       const chip = document.createElement('span');
       chip.className = 'msg-attach-chip';
-      chip.innerText = `${a.binary ? '🗎' : '📄'} ${a.name}`;
+      chip.innerText = `${a.mention ? '@' : (a.binary ? '🗎' : '📄')} ${a.name}`;
       chip.title = a.name;
       wrap.appendChild(chip);
     });
@@ -1530,6 +1530,164 @@ function buildAttachmentBlock(attachments) {
 // ---- Importação de arquivos para o chat ----
 let pendingAttachments = [];
 const ATTACH_MAX = 120 * 1024; // ~120 KB de texto por arquivo
+
+// --------------------------------------------------------------------------
+//  Menção de arquivo (@arquivo): autocomplete no composer + anexo automático
+// --------------------------------------------------------------------------
+let mentionFiles = [];       // cache da árvore de arquivos do workspace atual
+let mentionFilesFor = null;  // caminho do workspace a que o cache pertence
+let mentionState = null;     // { start, end, items, index } enquanto o menu está aberto
+
+// (Re)carrega a lista recursiva de arquivos do workspace, se ainda não estiver em cache.
+async function ensureMentionFiles() {
+  const chat = activeChat();
+  if (!chat || !chat.path) { mentionFiles = []; mentionFilesFor = null; return; }
+  if (mentionFilesFor === chat.path) return; // já em cache para este workspace
+  try {
+    const res = await window.electronAPI.listTree(chat.path);
+    mentionFiles = (res && res.files) || [];
+    mentionFilesFor = chat.path;
+  } catch (e) {
+    mentionFiles = []; mentionFilesFor = null;
+  }
+}
+
+// Descobre se o cursor está dentro de um trecho "@algo" (sem espaços após o @).
+function mentionCtx() {
+  const el = document.getElementById('user-input');
+  if (!el || el.disabled) return null;
+  const pos = el.selectionStart;
+  if (pos !== el.selectionEnd) return null; // há seleção ativa: ignora
+  const before = el.value.slice(0, pos);
+  const at = before.lastIndexOf('@');
+  if (at === -1) return null;
+  if (at > 0 && !/\s/.test(before[at - 1])) return null; // @ precisa iniciar palavra
+  const query = before.slice(at + 1);
+  if (/\s/.test(query)) return null; // já digitou espaço depois do @ → não é mais menção
+  return { start: at, end: pos, query };
+}
+
+// Ordena priorizando correspondência no nome do arquivo (não só no caminho).
+function mentionScore(f, q) {
+  const base = f.slice(f.lastIndexOf('/') + 1).toLowerCase();
+  const inBase = base.indexOf(q);
+  if (inBase === 0) return 0;
+  if (inBase > 0) return 1;
+  return 2 + f.toLowerCase().indexOf(q) / 100000;
+}
+
+async function updateMentionMenu() {
+  if (!mentionCtx()) return closeMention();
+  await ensureMentionFiles();
+  const ctx = mentionCtx(); // recomputa: o usuário pode ter digitado durante o await
+  if (!ctx) return closeMention();
+  const q = ctx.query.toLowerCase();
+  let items;
+  if (!q) {
+    items = mentionFiles.slice(0, 50);
+  } else {
+    items = mentionFiles
+      .filter(f => f.toLowerCase().includes(q))
+      .sort((a, b) => mentionScore(a, q) - mentionScore(b, q))
+      .slice(0, 50);
+  }
+  mentionState = { start: ctx.start, end: ctx.end, items, index: 0 };
+  renderMentionMenu();
+}
+
+function renderMentionMenu() {
+  const menu = document.getElementById('mention-menu');
+  if (!menu || !mentionState) return;
+  menu.innerHTML = '';
+  if (!mentionState.items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'mention-empty';
+    empty.innerText = mentionFilesFor ? 'Nenhum arquivo corresponde' : 'Selecione uma pasta de trabalho';
+    menu.appendChild(empty);
+    menu.hidden = false;
+    return;
+  }
+  mentionState.items.forEach((f, i) => {
+    const slash = f.lastIndexOf('/');
+    const row = document.createElement('div');
+    row.className = 'mention-item' + (i === mentionState.index ? ' active' : '');
+    const nameEl = document.createElement('span');
+    nameEl.className = 'mention-name';
+    nameEl.innerText = slash === -1 ? f : f.slice(slash + 1);
+    const dirEl = document.createElement('span');
+    dirEl.className = 'mention-dir';
+    dirEl.innerText = slash === -1 ? '' : f.slice(0, slash);
+    row.append(nameEl, dirEl);
+    // mousedown (não click) + preventDefault mantém o foco no textarea
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); acceptMention(f); });
+    menu.appendChild(row);
+  });
+  menu.hidden = false;
+  const active = menu.querySelector('.mention-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function closeMention() {
+  mentionState = null;
+  const menu = document.getElementById('mention-menu');
+  if (menu) { menu.hidden = true; menu.innerHTML = ''; }
+}
+
+// Teclado do menu: retorna true quando "consome" a tecla (impede enviar/nova linha).
+function handleMentionKeydown(e) {
+  if (!mentionState) return false;
+  const n = mentionState.items.length;
+  if (e.key === 'ArrowDown') {
+    if (n) { mentionState.index = (mentionState.index + 1) % n; renderMentionMenu(); }
+    e.preventDefault(); return true;
+  }
+  if (e.key === 'ArrowUp') {
+    if (n) { mentionState.index = (mentionState.index - 1 + n) % n; renderMentionMenu(); }
+    e.preventDefault(); return true;
+  }
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    if (n) acceptMention(mentionState.items[mentionState.index]);
+    else closeMention();
+    return true;
+  }
+  if (e.key === 'Escape') { closeMention(); e.preventDefault(); return true; }
+  return false;
+}
+
+// Substitui o "@query" pelo caminho escolhido e anexa o conteúdo do arquivo.
+async function acceptMention(relPath) {
+  const el = document.getElementById('user-input');
+  if (!el || !mentionState) return closeMention();
+  const insert = '@' + relPath + ' ';
+  el.value = el.value.slice(0, mentionState.start) + insert + el.value.slice(mentionState.end);
+  const caret = mentionState.start + insert.length;
+  el.setSelectionRange(caret, caret);
+  el.focus();
+  closeMention();
+  el.dispatchEvent(new Event('input')); // reajusta a altura e fecha o menu residual
+  await addMentionAttachment(relPath);
+}
+
+// Lê o arquivo mencionado e o adiciona como anexo (dedupe por caminho).
+async function addMentionAttachment(relPath) {
+  const chat = activeChat();
+  if (!chat || !chat.path) return;
+  if (pendingAttachments.some(a => a.mention && a.path === relPath)) return;
+  let content;
+  try {
+    content = await window.electronAPI.readFile(`${chat.path}/${relPath}`);
+  } catch (e) {
+    logSystem(`Não consegui ler o arquivo mencionado: ${relPath}`);
+    return;
+  }
+  if (content == null) return;
+  let truncated = false;
+  const size = content.length;
+  if (content.length > ATTACH_MAX) { content = content.slice(0, ATTACH_MAX); truncated = true; }
+  pendingAttachments.push({ name: relPath, path: relPath, mention: true, content, size, truncated });
+  renderAttachments();
+}
 const TEXT_EXT = /\.(txt|md|markdown|js|mjs|cjs|ts|jsx|tsx|json|jsonc|html?|css|scss|sass|less|py|rb|go|rs|java|kt|c|h|hpp|cpp|cc|cs|php|sh|bash|zsh|zig|yml|yaml|toml|ini|cfg|conf|env|xml|sql|csv|tsv|log|vue|svelte|swift|dart|lua|r|pl|pm|ex|exs|erl|hs|clj|gradle|properties)$/i;
 const TEXT_NAME = /^(dockerfile|makefile|\.gitignore|\.env|readme|license|procfile)$/i;
 
@@ -1579,7 +1737,7 @@ function renderAttachments() {
     chip.className = 'attach-chip' + (a.binary ? ' binary' : '');
     const icon = document.createElement('span');
     icon.className = 'attach-icon';
-    icon.innerText = a.binary ? '🗎' : '📄';
+    icon.innerText = a.mention ? '@' : (a.binary ? '🗎' : '📄');
     const name = document.createElement('span');
     name.className = 'attach-name';
     name.innerText = a.name;
@@ -1776,6 +1934,7 @@ function wireEvents() {
     const folderPath = await window.electronAPI.selectFolder();
     if (folderPath) {
       activeChat().path = folderPath;
+      mentionFiles = []; mentionFilesFor = null; // invalida o cache do autocomplete de @
       document.getElementById('selected-path').innerText = folderPath;
       logSystem(`Workspace definido para: ${folderPath}`);
       updateInputState();
@@ -1807,8 +1966,17 @@ function wireEvents() {
   });
   inputEl.addEventListener('input', autoGrow);
   inputEl.addEventListener('keydown', (e) => {
+    if (handleMentionKeydown(e)) return; // o menu de menção captura setas/Enter/Tab/Esc
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
+
+  // Autocomplete de menção de arquivo (@): abre/atualiza conforme o texto e o cursor
+  inputEl.addEventListener('input', () => updateMentionMenu());
+  inputEl.addEventListener('click', () => updateMentionMenu());
+  inputEl.addEventListener('keyup', (e) => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) updateMentionMenu();
+  });
+  inputEl.addEventListener('blur', () => setTimeout(closeMention, 120));
 
   // Anexar arquivos: botão + seletor nativo
   const fileInput = document.getElementById('file-input');

@@ -334,12 +334,61 @@
     }
 
     .composer {
+      position: relative;
       background: var(--surface-2);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 6px;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.30);
       transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    /* Menu de autocomplete da menção de arquivo (@arquivo) */
+    .mention-menu {
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      bottom: calc(100% + 6px);
+      max-height: 260px;
+      overflow-y: auto;
+      background: var(--surface-2);
+      border: 1px solid var(--border-2);
+      border-radius: 12px;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+      padding: 5px;
+      z-index: 40;
+    }
+
+    .mention-menu[hidden] { display: none; }
+
+    .mention-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .mention-item.active { background: var(--surface-3); }
+
+    .mention-name { color: var(--text); font-weight: 500; }
+
+    .mention-dir {
+      color: var(--muted-2);
+      font-size: 0.74rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .mention-empty {
+      padding: 9px 10px;
+      font-size: 0.8rem;
+      color: var(--muted-2);
     }
 
     .composer:focus-within {
@@ -1590,6 +1639,7 @@
 
       <div class="input-area">
         <div class="composer">
+          <div class="mention-menu" id="mention-menu" hidden></div>
           <div class="attachments" id="attachments" style="display:none;"></div>
           <div class="composer-row">
             <button id="btn-attach" class="composer-btn" title="Anexar arquivos" disabled>
@@ -1606,7 +1656,7 @@
               <button class="exec-opt" data-mode="auto">Auto</button>
               <button class="exec-opt active" data-mode="manual">Manual</button>
             </div>
-            <div class="composer-hint">Enter envia · Shift+Enter nova linha · arraste arquivos para anexar</div>
+            <div class="composer-hint">Enter envia · Shift+Enter nova linha · @ menciona um arquivo · arraste para anexar</div>
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { APP_NAME, DEFAULT_SETTINGS, MAX_LOOP_ITERATIONS, MAX_REQUEST_RETRIES, MAX_TOOL_RESULT_CHARS, REQUEST_RETRY_DELAY_MS, system_prompt } from "./constants.js";
+import { APP_NAME, DEFAULT_SETTINGS, MAX_LOOP_ITERATIONS, MAX_REQUEST_RETRIES, MAX_TOOL_RESULT_CHARS, READ_FILE_MAX_CHARS, READ_FILE_MAX_LINES, REQUEST_RETRY_DELAY_MS, system_prompt } from "./constants.js";
 
 let state = {
   chats: {},          // { id: { id, name, path, messages: [] } }
@@ -705,6 +705,13 @@ function summarizeToolCall(name, args) {
 function summarizeToolResult(name, resultStr) {
   if (resultStr == null) return '';
   if (name === 'read_file') {
+    const m = resultStr.match(/^\[Arquivo ".*?" — linhas (\d+)–(\d+) de (\d+)\]/);
+    if (m) {
+      const restam = Number(m[3]) - Number(m[2]);
+      return restam > 0
+        ? `✓ linhas ${m[1]}–${m[2]} de ${m[3]} (restam ${restam})`
+        : `✓ linhas ${m[1]}–${m[2]} de ${m[3]}`;
+    }
     const lines = resultStr.split('\n').length;
     return `✓ ${lines} linha(s) lidas`;
   }
@@ -848,6 +855,57 @@ function truncate(str, max) {
   return str.length > max ? str.slice(0, max) + `\n… (truncado, ${str.length} caracteres)` : str;
 }
 
+// Lê um arquivo em JANELA de linhas (paginação por offset), em vez de cortar em silêncio.
+// Arquivos pequenos voltam inteiros (sem cabeçalho). Arquivos grandes voltam em partes, com
+// um rodapé dizendo quantas linhas faltam e qual offset usar para continuar — evitando tanto
+// o "modelo só vê o começo" quanto a perda de conteúdo ao reescrever com write_file.
+function readFileWindow(filename, raw, offset, limit) {
+  const text = String(raw ?? '');
+  if (text === '') return `Arquivo "${filename}" está vazio.`;
+
+  const allLines = text.split('\n');
+  const total = allLines.length;
+
+  let start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 1;
+  let want = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : READ_FILE_MAX_LINES;
+  want = Math.min(want, READ_FILE_MAX_LINES);
+
+  if (start > total) {
+    return `Arquivo "${filename}" tem ${total} linha(s). O offset ${start} está além do fim — nada a mostrar.`;
+  }
+
+  // Seleciona a janela respeitando o teto de linhas E o de caracteres (linhas muito longas).
+  const chunk = [];
+  let chars = 0;
+  for (let i = start - 1; i < total && chunk.length < want; i++) {
+    const ln = allLines[i];
+    // Para se a próxima linha estourar o orçamento de chars — mas garante ao menos 1 linha.
+    if (chunk.length > 0 && chars + ln.length + 1 > READ_FILE_MAX_CHARS) break;
+    chunk.push(ln);
+    chars += ln.length + 1;
+  }
+  const shownEnd = start - 1 + chunk.length; // última linha mostrada (base 1)
+  let body = chunk.join('\n');
+
+  // Trava dura de caracteres: uma única linha gigante (ex: arquivo minificado) pode furar o
+  // orçamento mesmo cabendo em "1 linha". Aqui o corte é SINALIZADO, não silencioso.
+  let charNote = '';
+  if (body.length > READ_FILE_MAX_CHARS) {
+    body = body.slice(0, READ_FILE_MAX_CHARS);
+    charNote = `\n\n[… conteúdo desta janela cortado em ${READ_FILE_MAX_CHARS} caracteres (linhas muito longas)]`;
+  }
+
+  // Arquivo cabe inteiro na janela: retorna direto (comportamento antigo p/ arquivos pequenos).
+  if (start === 1 && shownEnd === total && !charNote) return body;
+
+  const header = `[Arquivo "${filename}" — linhas ${start}–${shownEnd} de ${total}]`;
+  let footer = charNote;
+  if (shownEnd < total) {
+    footer += `\n\n[… restam ${total - shownEnd} linha(s). Para continuar, chame read_file com offset=${shownEnd + 1}]`;
+  }
+  return `${header}\n${body}${footer}`;
+}
+
 // Recorta pelo MEIO preservando início e fim (o erro costuma estar no fim da saída)
 function clipMiddle(str, max) {
   str = String(str || '');
@@ -877,11 +935,17 @@ const tools = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Lê o conteúdo de um arquivo específico no workspace.',
+      description: 'Lê o conteúdo de um arquivo do workspace. Arquivos grandes são retornados em ' +
+        'JANELAS de linhas (padrão: ' + READ_FILE_MAX_LINES + ' linhas por leitura). Se o resultado ' +
+        'avisar que restam linhas, chame read_file de novo com "offset" na linha indicada para ler o ' +
+        'restante — o arquivo NÃO é cortado silenciosamente. Antes de reescrever um arquivo grande, ' +
+        'leia todas as partes.',
       parameters: {
         type: 'object',
         properties: {
-          filename: { type: 'string', description: 'Nome ou caminho relativo do arquivo' }
+          filename: { type: 'string', description: 'Nome ou caminho relativo do arquivo' },
+          offset: { type: 'number', description: 'Linha inicial da leitura (base 1). Padrão: 1.' },
+          limit: { type: 'number', description: `Máximo de linhas a retornar nesta leitura (teto: ${READ_FILE_MAX_LINES}).` }
         },
         required: ['filename']
       }
@@ -1035,7 +1099,7 @@ async function runTool(name, args, workspace) {
     }
     if (name === 'read_file') {
       const content = await window.electronAPI.readFile(`${workspace}/${args.filename}`);
-      return truncate(content, MAX_TOOL_RESULT_CHARS);
+      return readFileWindow(args.filename, content, args.offset, args.limit);
     }
     if (name === 'write_file') {
       const res = await window.electronAPI.writeFile(`${workspace}/${args.filename}`, args.content ?? '');

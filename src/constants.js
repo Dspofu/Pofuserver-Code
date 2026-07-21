@@ -3,7 +3,7 @@ export const system_prompt = (path, web_search) => `Você é um assistente de de
 PRINCÍPIOS DE TRABALHO:
 1. Investigue antes de agir: use list_files e read_file para entender a estrutura, convenções e o estilo do projeto ANTES de criar ou alterar código. Não presuma nomes de arquivos, dependências ou frameworks — verifique.
 2. Passos pequenos e verificados: faça uma mudança de cada vez e confirme o resultado (rode testes/linters/o próprio programa com execute_command) antes de prosseguir. Se um comando falhar, LEIA o stderr/exit code retornado e corrija a causa — não repita o mesmo comando.
-3. Código idiomático: siga as convenções já presentes no projeto (indentação, nomes, padrões). Prefira editar arquivos existentes a recriá-los; leia o arquivo antes de sobrescrevê-lo para não perder conteúdo.
+3. Código idiomático: siga as convenções já presentes no projeto (indentação, nomes, padrões). Prefira editar arquivos existentes a recriá-los; leia o arquivo antes de sobrescrevê-lo para não perder conteúdo. Arquivos grandes são lidos em PARTES (janelas de linhas): se o read_file avisar que restam linhas, use o parâmetro offset para ler o restante ANTES de reescrever o arquivo inteiro — senão você apaga o que ficou fora da janela.
 4. Ferramentas de arquivo: use write_file (cria as pastas pai automaticamente), create_directory, read_file e delete_file em vez de comandos de shell equivalentes quando possível — é mais seguro e claro.
 5. Processos longos: servidores/APIs (execute_command que não termina) rodam em segundo plano e retornam um PID. Continue trabalhando; verifique se subiu com read_process_output(pid) e encerre com stop_process(pid) quando não precisar mais. Evite sudo e comandos interativos.
 6. Seja explícito sobre suposições e limitações. Quando a tarefa estiver concluída, responda ao usuário com um resumo objetivo do que foi feito, sem chamar mais ferramentas.`
@@ -29,7 +29,15 @@ export const DEFAULT_SETTINGS = {
 
 export const APP_NAME = 'Pofuserver Coder Studio';
 
-export const MAX_TOOL_RESULT_CHARS = 6000; // evita estourar o contexto de modelos pequenos
+export const MAX_TOOL_RESULT_CHARS = 6000; // teto p/ resultados de web (web_search / fetch_url)
+
+// Leitura de arquivos: em vez de CORTAR um arquivo grande em silêncio (o modelo só via o
+// começo e "perdia" o resto — e, ao reescrever com write_file, apagava o que ficou de fora),
+// read_file devolve o conteúdo em JANELAS de linhas e informa como pedir a próxima parte
+// (paginação por offset). Assim um modelo com contexto de sobra (ex: Qwen3 27B) consegue ler
+// um arquivo de 1000+ linhas por completo, em partes, sem perda.
+export const READ_FILE_MAX_LINES = 500;    // linhas por leitura (padrão e teto)
+export const READ_FILE_MAX_CHARS = 20000;  // trava secundária p/ linhas muito longas (ex: minificados)
 // Trava de segurança ALTA apenas contra loop verdadeiramente infinito; o controle
 // real é o botão "Parar". Tarefas longas e legítimas rodam sem serem bloqueadas.
 export const MAX_LOOP_ITERATIONS = 100;

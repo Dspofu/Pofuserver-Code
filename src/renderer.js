@@ -1254,10 +1254,9 @@ function renderMsgStats(msgDiv, stats) {
   if (!msgDiv || !stats) return;
   const parts = [];
   if (stats.tps > 0) parts.push(`${stats.tps} tok/s`);
-  if (stats.completion > 0) parts.push(`${stats.completion} tokens gerados`);
-  if (stats.totalSec > 0) parts.push(`${stats.totalSec}s`);
+  if (stats.completion > 0) parts.push(`+${stats.completion} contexto`);
+  if (stats.totalSec > 0) parts.push(`${stats.totalSec}s até a finalização`);
   if (stats.ttftSec > 0) parts.push(`${stats.ttftSec}s até 1º token`);
-  if (stats.total > 0) parts.push(`${stats.total} tkn no contexto`);
   if (!parts.length) return;
   const bar = document.createElement('div');
   bar.className = 'msg-stats';

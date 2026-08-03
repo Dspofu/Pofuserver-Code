@@ -139,6 +139,14 @@ que a ausência dele.
   estouro, aproveitando o que já renderizou.
 - **Servidor local**: a porta e o modelo do llama.cpp variam — confirme com o usuário antes de
   assumir `http://localhost:8080/v1`.
+- **`build/icon.ico` não pode ser PNG puro**: um `.ico` cujas imagens estão todas comprimidas em
+  PNG deixa o EXE com ícone (o Explorer usa `SHGetFileInfo`, que lê PNG) mas o ATALHO `.lnk` em
+  branco — desenhar o ícone com a setinha de atalho passa por `ExtractIconEx`, que só aceita
+  bitmap não comprimido nos tamanhos pequenos. Por isso as imagens até 128px estão gravadas
+  como DIB 32bpp (BGRA de baixo para cima + máscara AND zerada) e só a de 256px segue em PNG,
+  que é o único tamanho onde a compressão é oficialmente suportada. Se regerar o ícone a partir
+  dos PNGs de `build/icons/`, confira com `file build/icon.ico`: aparecer "with PNG image data"
+  nos tamanhos pequenos é o bug de volta.
 
 ## Git
 
